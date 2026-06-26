@@ -3,6 +3,7 @@ import json
 import numpy as np
 import faiss
 from tqdm import tqdm
+from config import EMBEDDING_DIR, FAISS_DIR, LOG_DIR, save_versioned_file
 
 def retrieve_ip(query_embedding, faiss_index, top_k=10, exclude_index=None):
     """
@@ -112,26 +113,26 @@ def compute_metrics_for_mode(query_embeddings, labels, faiss_index, is_cosine=Tr
     }
 
 def main():
-    labels_file = "labels.npy"
+    labels_file = os.path.join(EMBEDDING_DIR, "labels.npy")
     if not os.path.exists(labels_file):
-        raise FileNotFoundError("Labels file 'labels.npy' not found! Run extraction scripts first.")
+        raise FileNotFoundError(f"Labels file '{labels_file}' not found! Run extraction scripts first.")
         
     labels = np.load(labels_file)
     print("Pre-computing evaluation metrics for all configurations...")
 
     # Load Baseline Embeddings and FAISS indices
     print("Loading Baseline Embeddings...")
-    b_pan_embs = np.load("pan_embeddings.npy")
-    b_mul_embs = np.load("mul_embeddings.npy")
-    b_pan_index = faiss.read_index("pan_index.bin")
-    b_mul_index = faiss.read_index("mul_index.bin")
+    b_pan_embs = np.load(os.path.join(EMBEDDING_DIR, "pan_embeddings.npy"))
+    b_mul_embs = np.load(os.path.join(EMBEDDING_DIR, "mul_embeddings.npy"))
+    b_pan_index = faiss.read_index(os.path.join(FAISS_DIR, "pan_index.bin"))
+    b_mul_index = faiss.read_index(os.path.join(FAISS_DIR, "mul_index.bin"))
 
     # Load Contrastive Embeddings and FAISS indices
     print("Loading Contrastive Embeddings...")
-    c_pan_embs = np.load("pan_embeddings_contrastive.npy")
-    c_mul_embs = np.load("mul_embeddings_contrastive.npy")
-    c_pan_index = faiss.read_index("pan_index_contrastive.bin")
-    c_mul_index = faiss.read_index("mul_index_contrastive.bin")
+    c_pan_embs = np.load(os.path.join(EMBEDDING_DIR, "pan_embeddings_contrastive.npy"))
+    c_mul_embs = np.load(os.path.join(EMBEDDING_DIR, "mul_embeddings_contrastive.npy"))
+    c_pan_index = faiss.read_index(os.path.join(FAISS_DIR, "pan_index_contrastive.bin"))
+    c_mul_index = faiss.read_index(os.path.join(FAISS_DIR, "mul_index_contrastive.bin"))
 
     summary = {
         "baseline": {},
@@ -152,12 +153,18 @@ def main():
     summary["contrastive"]["PAN_MUL"] = compute_metrics_for_mode(c_pan_embs, labels, c_mul_index, is_cosine=True)
     summary["contrastive"]["MUL_PAN"] = compute_metrics_for_mode(c_mul_embs, labels, c_pan_index, is_cosine=True)
 
-    # 3. Save to JSON
-    output_file = "metrics_summary.json"
-    with open(output_file, "w") as f:
-        json.dump(summary, f, indent=4)
+    # 3. Save to separate JSON files
+    baseline_file = os.path.join(LOG_DIR, "metrics_summary_baseline.json")
+    with open(baseline_file, "w") as f:
+        json.dump(summary["baseline"], f, indent=4)
+    save_versioned_file(baseline_file)
+
+    contrastive_file = os.path.join(LOG_DIR, "metrics_summary_contrastive.json")
+    with open(contrastive_file, "w") as f:
+        json.dump(summary["contrastive"], f, indent=4)
+    save_versioned_file(contrastive_file)
         
-    print(f"\nSuccessfully pre-computed all metrics and saved to '{output_file}'!")
+    print(f"\nSuccessfully pre-computed all metrics and saved to separate files under '{LOG_DIR}'!")
     print(json.dumps(summary, indent=2))
 
 if __name__ == "__main__":

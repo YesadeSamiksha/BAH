@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from dataset import DSRSIDDataset
+from config import DATASET_PATH, EMBEDDING_DIR, FAISS_DIR, OUTPUT_DIR, RETRIEVAL_MODE, save_versioned_file
 
 def retrieve(query_embedding, faiss_index, top_k=5, exclude_index=None):
     """
@@ -98,7 +99,7 @@ def evaluate_mode(query_embeddings, labels, faiss_index, mode_name, top_k=5):
     
     return avg_p, avg_r, avg_f1
 
-def visualize_query(dataset, query_idx, pan_embeddings, mul_index, labels, output_path="retrieval_results.png"):
+def visualize_query(dataset, query_idx, pan_embeddings, mul_index, labels, output_path=None):
     """
     Visualizes cross-modal PAN -> MUL retrieval for a single query.
     Displays:
@@ -106,6 +107,8 @@ def visualize_query(dataset, query_idx, pan_embeddings, mul_index, labels, outpu
         - True Paired MUL image
         - Top-5 retrieved MUL images with labels and distances
     """
+    if output_path is None:
+        output_path = os.path.join(OUTPUT_DIR, "retrieval_results.png")
     print(f"\nGenerating visualization for query index {query_idx}...")
     
     query_emb = pan_embeddings[query_idx]
@@ -158,15 +161,27 @@ def visualize_query(dataset, query_idx, pan_embeddings, mul_index, labels, outpu
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
+    save_versioned_file(output_path)
     print(f"Visualization saved to '{output_path}'.")
 
 def main():
-    pan_index_file = "pan_index.bin"
-    mul_index_file = "mul_index.bin"
-    pan_embeddings_file = "pan_embeddings.npy"
-    mul_embeddings_file = "mul_embeddings.npy"
-    labels_file = "labels.npy"
-    indices_file = "subset_indices.npy"
+    if RETRIEVAL_MODE == "baseline":
+        print("Running retrieval in BASELINE mode...")
+        pan_index_file = os.path.join(FAISS_DIR, "pan_index.bin")
+        mul_index_file = os.path.join(FAISS_DIR, "mul_index.bin")
+        pan_embeddings_file = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
+        mul_embeddings_file = os.path.join(EMBEDDING_DIR, "mul_embeddings.npy")
+    elif RETRIEVAL_MODE == "contrastive":
+        print("Running retrieval in CONTRASTIVE mode...")
+        pan_index_file = os.path.join(FAISS_DIR, "pan_index_contrastive.bin")
+        mul_index_file = os.path.join(FAISS_DIR, "mul_index_contrastive.bin")
+        pan_embeddings_file = os.path.join(EMBEDDING_DIR, "pan_embeddings_contrastive.npy")
+        mul_embeddings_file = os.path.join(EMBEDDING_DIR, "mul_embeddings_contrastive.npy")
+    else:
+        raise ValueError(f"Unknown RETRIEVAL_MODE: {RETRIEVAL_MODE}")
+
+    labels_file = os.path.join(EMBEDDING_DIR, "labels.npy")
+    indices_file = os.path.join(EMBEDDING_DIR, "subset_indices.npy")
     
     # Check if necessary files exist
     required_files = [pan_index_file, mul_index_file, pan_embeddings_file, mul_embeddings_file, labels_file, indices_file]
@@ -176,7 +191,7 @@ def main():
             
     # Load indices and instantiate Dataset
     subset_indices = np.load(indices_file)
-    dataset = DSRSIDDataset(file_path="data/DSRSID.mat", indices=subset_indices)
+    dataset = DSRSIDDataset(file_path=DATASET_PATH, indices=subset_indices)
     
     # Load embeddings and labels
     pan_embeddings = np.load(pan_embeddings_file)

@@ -2,6 +2,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
+from config import EMBEDDING_DIR, OUTPUT_DIR, save_versioned_file
 
 def generate_tsne_plot(pan_embs, mul_embs, labels, title, output_path, samples_per_class=100):
     """
@@ -107,42 +108,46 @@ def generate_tsne_plot(pan_embs, mul_embs, labels, title, output_path, samples_p
 
 def main():
     # 1. Load labels
-    labels_file = "labels.npy"
+    labels_file = os.path.join(EMBEDDING_DIR, "labels.npy")
     if not os.path.exists(labels_file):
-        raise FileNotFoundError("Labels file 'labels.npy' not found. Please run baseline extraction first.")
+        raise FileNotFoundError(f"Labels file '{labels_file}' not found. Please run baseline extraction first.")
     labels = np.load(labels_file)
 
     # 2. Generate Before Training Plot (Baseline 512D)
     print("\n--- Processing Baseline (Before Training) Embeddings ---")
-    pan_before_file = "pan_embeddings.npy"
-    mul_before_file = "mul_embeddings.npy"
+    pan_before_file = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
+    mul_before_file = os.path.join(EMBEDDING_DIR, "mul_embeddings.npy")
     
     if os.path.exists(pan_before_file) and os.path.exists(mul_before_file):
         pan_before = np.load(pan_before_file)
         mul_before = np.load(mul_before_file)
         
+        before_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_before.png")
         generate_tsne_plot(
             pan_before, mul_before, labels,
             title="t-SNE Embeddings Space Before Training (Baseline 512D)",
-            output_path="embeddings_tsne_before.png"
+            output_path=before_path
         )
+        save_versioned_file(before_path)
     else:
         print("Warning: Baseline embeddings not found. Skipping 'before' plot.")
 
     # 3. Generate After Training Plot (Contrastive 128D)
     print("\n--- Processing Contrastive (After Training) Embeddings ---")
-    pan_after_file = "pan_embeddings_contrastive.npy"
-    mul_after_file = "mul_embeddings_contrastive.npy"
+    pan_after_file = os.path.join(EMBEDDING_DIR, "pan_embeddings_contrastive.npy")
+    mul_after_file = os.path.join(EMBEDDING_DIR, "mul_embeddings_contrastive.npy")
     
     if os.path.exists(pan_after_file) and os.path.exists(mul_after_file):
         pan_after = np.load(pan_after_file)
         mul_after = np.load(mul_after_file)
         
+        after_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_after.png")
         generate_tsne_plot(
             pan_after, mul_after, labels,
             title="t-SNE Embeddings Space After Supervised Contrastive Training (128D)",
-            output_path="embeddings_tsne_after.png"
+            output_path=after_path
         )
+        save_versioned_file(after_path)
     else:
         print("Warning: Contrastive embeddings not found. Skipping 'after' plot.")
 

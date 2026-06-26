@@ -1,6 +1,8 @@
 import h5py
 
-with h5py.File("data/DSRSID.mat", "r") as f:
+from config import DATASET_PATH
+
+with h5py.File(DATASET_PATH, "r") as f:
 
     print("Keys:")
     print(list(f.keys()))

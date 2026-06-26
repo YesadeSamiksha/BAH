@@ -6,7 +6,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import DSRSIDDataset
-from train_contrastive import ContrastiveModel, FREEZE_BACKBONE
+from train_contrastive import ContrastiveModel
+from config import DATASET_PATH, MODEL_DIR, EMBEDDING_DIR, FAISS_DIR, BATCH_SIZE, FREEZE_BACKBONE, save_versioned_file
 
 def retrieve_ip(query_embedding, faiss_index, top_k=5, exclude_index=None):
     """
@@ -92,8 +93,8 @@ def evaluate(query_embeddings, labels, faiss_index, is_cosine=True, top_k=5):
     return np.mean(precisions), np.mean(recalls), np.mean(f1s)
 
 def main():
-    best_model_path = "best_model.pth"
-    indices_path = "subset_indices.npy"
+    best_model_path = os.path.join(MODEL_DIR, "best_model.pth")
+    indices_path = os.path.join(EMBEDDING_DIR, "subset_indices.npy")
     
     if not os.path.exists(best_model_path) or not os.path.exists(indices_path):
         raise FileNotFoundError(
@@ -102,9 +103,9 @@ def main():
 
     # 1. Load indices and setup dataset/dataloader
     subset_indices = np.load(indices_path)
-    dataset = DSRSIDDataset(file_path="data/DSRSID.mat", indices=subset_indices)
-    dataloader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0)
-    labels = np.load("labels.npy")
+    dataset = DSRSIDDataset(file_path=DATASET_PATH, indices=subset_indices)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    labels = np.load(os.path.join(EMBEDDING_DIR, "labels.npy"))
 
     # 2. Instantiate and load contrastive model
     print("Loading contrastive model...")
@@ -141,8 +142,12 @@ def main():
     mul_embs_norm = mul_embs / np.linalg.norm(mul_embs, axis=1, keepdims=True)
 
     # Save embeddings
-    np.save("pan_embeddings_contrastive.npy", pan_embs_norm)
-    np.save("mul_embeddings_contrastive.npy", mul_embs_norm)
+    pan_emb_path = os.path.join(EMBEDDING_DIR, "pan_embeddings_contrastive.npy")
+    mul_emb_path = os.path.join(EMBEDDING_DIR, "mul_embeddings_contrastive.npy")
+    np.save(pan_emb_path, pan_embs_norm)
+    np.save(mul_emb_path, mul_embs_norm)
+    save_versioned_file(pan_emb_path)
+    save_versioned_file(mul_emb_path)
     print("Contrastive embeddings saved to disk.")
 
     # 5. Build FAISS IndexFlatIP indices (Cosine similarity)
@@ -153,8 +158,12 @@ def main():
     pan_index_contrastive.add(pan_embs_norm.astype('float32'))
     mul_index_contrastive.add(mul_embs_norm.astype('float32'))
 
-    faiss.write_index(pan_index_contrastive, "pan_index_contrastive.bin")
-    faiss.write_index(mul_index_contrastive, "mul_index_contrastive.bin")
+    pan_idx_path = os.path.join(FAISS_DIR, "pan_index_contrastive.bin")
+    mul_idx_path = os.path.join(FAISS_DIR, "mul_index_contrastive.bin")
+    faiss.write_index(pan_index_contrastive, pan_idx_path)
+    faiss.write_index(mul_index_contrastive, mul_idx_path)
+    save_versioned_file(pan_idx_path)
+    save_versioned_file(mul_idx_path)
     print("Contrastive FAISS indices built and saved.")
 
     # 6. Evaluate Contrastive Model (128D Cosine)
@@ -166,10 +175,10 @@ def main():
 
     # 7. Evaluate Baseline Model (512D L2) dynamically for side-by-side comparison
     print("Evaluating Baseline Model retrieval performance for comparison...")
-    base_pan = np.load("pan_embeddings.npy")
-    base_mul = np.load("mul_embeddings.npy")
-    base_pan_index = faiss.read_index("pan_index.bin")
-    base_mul_index = faiss.read_index("mul_index.bin")
+    base_pan = np.load(os.path.join(EMBEDDING_DIR, "pan_embeddings.npy"))
+    base_mul = np.load(os.path.join(EMBEDDING_DIR, "mul_embeddings.npy"))
+    base_pan_index = faiss.read_index(os.path.join(FAISS_DIR, "pan_index.bin"))
+    base_mul_index = faiss.read_index(os.path.join(FAISS_DIR, "mul_index.bin"))
 
     b_pan_pan_p, b_pan_pan_r, b_pan_pan_f = evaluate(base_pan, labels, base_pan_index, is_cosine=False)
     b_mul_mul_p, b_mul_mul_r, b_mul_mul_f = evaluate(base_mul, labels, base_mul_index, is_cosine=False)

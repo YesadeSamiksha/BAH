@@ -1,5 +1,6 @@
 import os
 import csv
+import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,14 +12,26 @@ import faiss
 from tqdm import tqdm
 
 from dataset import DSRSIDDataset
+from config import (
+    DATASET_PATH,
+    MODEL_DIR,
+    CHECKPOINT_DIR,
+    EMBEDDING_DIR,
+    LOG_DIR,
+    OUTPUT_DIR,
+    FREEZE_BACKBONE,
+    BATCH_SIZE,
+    EPOCHS,
+    LEARNING_RATE,
+    TEMPERATURE,
+    PATIENCE,
+    AUTO_RESUME,
+    USE_FULL_DATASET,
+    save_versioned_file,
+    save_timestamped_file
+)
 
-# Configuration Constants
-FREEZE_BACKBONE = True  # Initially frozen. Can be changed to False to unfreeze later.
-BATCH_SIZE = 64
-EPOCHS = 15
-LR = 1e-3
-TEMPERATURE = 0.07
-PATIENCE = 5
+LR = LEARNING_RATE
 
 class ProjectionHead(nn.Module):
     """
@@ -142,11 +155,12 @@ def visualize_epoch_retrieval(model, epoch, val_pan_feats, val_mul_feats, val_la
     Generates and saves a PAN -> MUL retrieval plot using validation set embeddings.
     Allows visual tracking of alignment progress across training epochs.
     """
+    device = next(model.parameters()).device
     model.eval()
     with torch.no_grad():
         # Project validation features to 128D shared space
-        pan_proj_val = model.pan_proj(torch.tensor(val_pan_feats, dtype=torch.float32)).numpy()
-        mul_proj_val = model.mul_proj(torch.tensor(val_mul_feats, dtype=torch.float32)).numpy()
+        pan_proj_val = model.pan_proj(torch.tensor(val_pan_feats, dtype=torch.float32).to(device)).cpu().numpy()
+        mul_proj_val = model.mul_proj(torch.tensor(val_mul_feats, dtype=torch.float32).to(device)).cpu().numpy()
 
     # L2 normalize embeddings for Cosine Similarity (Inner Product in FAISS)
     pan_proj_val = pan_proj_val / np.linalg.norm(pan_proj_val, axis=1, keepdims=True)
@@ -157,8 +171,9 @@ def visualize_epoch_retrieval(model, epoch, val_pan_feats, val_mul_feats, val_la
     index = faiss.IndexFlatIP(dimension)
     index.add(mul_proj_val)
 
-    # Choose validation index 300 (belongs to Class 3.0 out of classes 1.0-8.0)
-    query_val_idx = 300
+    # Choose validation index dynamically corresponding to Class 3.0 (c=2)
+    val_samples_per_class = len(val_labels) // 8
+    query_val_idx = 2 * val_samples_per_class + int(val_samples_per_class * 0.4)
     query_emb = pan_proj_val[query_val_idx].reshape(1, -1)
     query_label = val_labels[query_val_idx]
 
@@ -226,12 +241,28 @@ def visualize_epoch_retrieval(model, epoch, val_pan_feats, val_mul_feats, val_la
     plt.close()
 
 def main():
+    # Save training configuration
+    config_dict = {
+        "epochs": EPOCHS,
+        "batch_size": BATCH_SIZE,
+        "learning_rate": LEARNING_RATE,
+        "temperature": TEMPERATURE,
+        "freeze_backbone": FREEZE_BACKBONE,
+        "dataset": "DSRSID",
+        "use_full_dataset": USE_FULL_DATASET
+    }
+    config_json_path = os.path.join(LOG_DIR, "training_config.json")
+    with open(config_json_path, "w") as f:
+        json.dump(config_dict, f, indent=4)
+    save_versioned_file(config_json_path)
+    print(f"Saved training configuration to '{config_json_path}'.")
+
     # 1. Load the pre-extracted 512D embeddings and labels from Phase 1
-    # This enables extremely fast projection head training on CPU.
-    pan_embeddings_path = "pan_embeddings.npy"
-    mul_embeddings_path = "mul_embeddings.npy"
-    labels_path = "labels.npy"
-    indices_path = "subset_indices.npy"
+    # This enables extremely fast projection head training on CPU/GPU.
+    pan_embeddings_path = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
+    mul_embeddings_path = os.path.join(EMBEDDING_DIR, "mul_embeddings.npy")
+    labels_path = os.path.join(EMBEDDING_DIR, "labels.npy")
+    indices_path = os.path.join(EMBEDDING_DIR, "subset_indices.npy")
 
     if not all(os.path.exists(f) for f in [pan_embeddings_path, mul_embeddings_path, labels_path, indices_path]):
         raise FileNotFoundError(
@@ -245,13 +276,14 @@ def main():
     subset_indices = np.load(indices_path)
 
     # 2. Perform stratified split: 80% Train, 20% Validation
-    # There are 8 classes, each with 625 samples.
-    # Train: 500 samples/class (4000 total). Val: 125 samples/class (1000 total).
+    # Train/Val split is computed dynamically based on the loaded embedding sizes.
     print("Creating stratified train/validation split (80/20)...")
     train_idx = []
     val_idx = []
-    samples_per_class = 625
-    train_split_count = 500
+    
+    total_samples = len(pan_feats)
+    samples_per_class = total_samples // 8
+    train_split_count = int(samples_per_class * 0.8)
 
     for c in range(8):
         start = c * samples_per_class
@@ -270,8 +302,8 @@ def main():
     val_mul_feats = mul_feats[val_idx]
     val_labels = labels[val_idx]
 
-    print(f"  Training samples:   {len(train_idx)} (500 per class)")
-    print(f"  Validation samples: {len(val_idx)} (125 per class)")
+    print(f"  Training samples:   {len(train_idx)} ({train_split_count} per class)")
+    print(f"  Validation samples: {len(val_idx)} ({samples_per_class - train_split_count} per class)")
 
     # 3. Create datasets and loaders for fast feature-based training
     train_dataset = TensorDataset(
@@ -289,7 +321,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     # Load raw dataset for visualization
-    raw_dataset = DSRSIDDataset(file_path="data/DSRSID.mat", indices=subset_indices)
+    raw_dataset = DSRSIDDataset(file_path=DATASET_PATH, indices=subset_indices)
 
     # 4. Initialize model, optimizer, and loss function
     # Only training projection heads, keeping backbone frozen
@@ -304,31 +336,68 @@ def main():
     
     criterion = SupervisedContrastiveLoss(temperature=TEMPERATURE)
 
-    # Track losses
+    # Track losses and metrics
     history = []
     best_val_loss = float("inf")
     patience_counter = 0
+    start_epoch = 1
+
+    # Mixed precision & device components
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    use_amp = (device.type == 'cuda')
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
+    # Auto-resume training logic
+    if AUTO_RESUME:
+        if os.path.exists(CHECKPOINT_DIR):
+            checkpoint_files = [f for f in os.listdir(CHECKPOINT_DIR) if f.startswith("checkpoint_epoch_") and f.endswith(".pth")]
+            if checkpoint_files:
+                try:
+                    epochs_found = [int(f.split("_")[-1].split(".")[0]) for f in checkpoint_files]
+                    latest_epoch = max(epochs_found)
+                    checkpoint_path = os.path.join(CHECKPOINT_DIR, f"checkpoint_epoch_{latest_epoch}.pth")
+                    print(f"Found checkpoint to resume: {checkpoint_path}")
+                    
+                    checkpoint = torch.load(checkpoint_path, map_location=device)
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    if 'scaler_state_dict' in checkpoint and use_amp and checkpoint['scaler_state_dict'] is not None:
+                        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                    best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+                    history = checkpoint.get('history', [])
+                    patience_counter = checkpoint.get('patience_counter', 0)
+                    start_epoch = latest_epoch + 1
+                    print(f"Resuming training from epoch {start_epoch} (best validation loss so far: {best_val_loss:.5f}).")
+                except Exception as e:
+                    print(f"Warning: Failed to load checkpoint. Starting from scratch. Error: {e}")
 
     # 5. Generate Initial Epoch 0 (Untrained state) visualization
-    visualize_epoch_retrieval(model, 0, val_pan_feats, val_mul_feats, val_labels, raw_dataset, val_idx, "retrieval_epoch_0.png")
-    print("Generated retrieval_epoch_0.png visualization.")
+    if start_epoch == 1:
+        epoch_0_visualization = os.path.join(OUTPUT_DIR, "retrieval_epoch_0.png")
+        visualize_epoch_retrieval(model, 0, val_pan_feats, val_mul_feats, val_labels, raw_dataset, val_idx, epoch_0_visualization)
+        print(f"Generated {epoch_0_visualization} visualization.")
 
     # 6. Training Loop
     print("\nStarting projection heads training...")
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(start_epoch, EPOCHS + 1):
         # Training Phase
         model.train()
         train_loss = 0.0
         for pan_b, mul_b, labels_b in train_loader:
+            pan_b, mul_b, labels_b = pan_b.to(device), mul_b.to(device), labels_b.to(device)
             optimizer.zero_grad()
             
-            # Project the cached ResNet features to 128D
-            proj_pan = model.pan_proj(pan_b)
-            proj_mul = model.mul_proj(mul_b)
+            # Project the cached ResNet features to 128D with mixed precision autocast
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                proj_pan = model.pan_proj(pan_b)
+                proj_mul = model.mul_proj(mul_b)
+                loss = criterion(proj_pan, proj_mul, labels_b)
             
-            loss = criterion(proj_pan, proj_mul, labels_b)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
             train_loss += loss.item() * pan_b.size(0)
 
         train_loss /= len(train_loader.dataset)
@@ -338,9 +407,11 @@ def main():
         val_loss = 0.0
         with torch.no_grad():
             for pan_b, mul_b, labels_b in val_loader:
-                proj_pan = model.pan_proj(pan_b)
-                proj_mul = model.mul_proj(mul_b)
-                loss = criterion(proj_pan, proj_mul, labels_b)
+                pan_b, mul_b, labels_b = pan_b.to(device), mul_b.to(device), labels_b.to(device)
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    proj_pan = model.pan_proj(pan_b)
+                    proj_mul = model.mul_proj(mul_b)
+                    loss = criterion(proj_pan, proj_mul, labels_b)
                 val_loss += loss.item() * pan_b.size(0)
 
         val_loss /= len(val_loader.dataset)
@@ -350,17 +421,37 @@ def main():
 
         # Epoch-based visualizations at 5 and 10
         if epoch == 5:
-            visualize_epoch_retrieval(model, 5, val_pan_feats, val_mul_feats, val_labels, raw_dataset, val_idx, "retrieval_epoch_5.png")
-            print("  Generated retrieval_epoch_5.png")
+            epoch_5_visualization = os.path.join(OUTPUT_DIR, "retrieval_epoch_5.png")
+            visualize_epoch_retrieval(model, 5, val_pan_feats, val_mul_feats, val_labels, raw_dataset, val_idx, epoch_5_visualization)
+            print(f"  Generated {epoch_5_visualization}")
         elif epoch == 10:
-            visualize_epoch_retrieval(model, 10, val_pan_feats, val_mul_feats, val_labels, raw_dataset, val_idx, "retrieval_epoch_10.png")
-            print("  Generated retrieval_epoch_10.png")
+            epoch_10_visualization = os.path.join(OUTPUT_DIR, "retrieval_epoch_10.png")
+            visualize_epoch_retrieval(model, 10, val_pan_feats, val_mul_feats, val_labels, raw_dataset, val_idx, epoch_10_visualization)
+            print(f"  Generated {epoch_10_visualization}")
+
+        # Save Epoch Checkpoint (Auto-resume checkpoint containing optimizer states, etc.)
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scaler_state_dict': scaler.state_dict() if use_amp else None,
+            'best_val_loss': best_val_loss,
+            'history': history,
+            'patience_counter': patience_counter
+        }
+        checkpoint_path = os.path.join(CHECKPOINT_DIR, f"checkpoint_epoch_{epoch}.pth")
+        torch.save(checkpoint, checkpoint_path)
+        print(f"  Saved checkpoint to '{checkpoint_path}'")
 
         # Early Stopping check
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             # Save best weights only
-            torch.save(model.state_dict(), "best_model.pth")
+            best_model_path = os.path.join(MODEL_DIR, "best_model.pth")
+            torch.save(model.state_dict(), best_model_path)
+            save_versioned_file(best_model_path)
+            save_timestamped_file(best_model_path)
+            print(f"  Saved best model to '{best_model_path}'")
             patience_counter = 0
         else:
             patience_counter += 1
@@ -368,17 +459,13 @@ def main():
                 print(f"\nEarly stopping triggered! No validation improvement for {PATIENCE} epochs.")
                 break
 
-    # Save validation plot for final epoch if it wasn't captured
-    if epoch >= 10:
-        # If epoch is greater than 10, let's also save the final epoch retrieval visualization as epoch 10 if epoch 10 was skipped
-        pass
-
-    # 7. Save training history to CSV
-    csv_file = "train_loss.csv"
+    # Save training history to CSV
+    csv_file = os.path.join(LOG_DIR, "train_loss.csv")
     with open(csv_file, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["epoch", "train_loss", "val_loss"])
         writer.writerows(history)
+    save_versioned_file(csv_file)
     print(f"\nLoss logs saved to '{csv_file}'.")
 
     # 8. Plot training curve
@@ -395,9 +482,11 @@ def main():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("training_curve.png", dpi=150)
+    curve_path = os.path.join(OUTPUT_DIR, "training_curve.png")
+    plt.savefig(curve_path, dpi=150)
     plt.close()
-    print("Training loss curve saved to 'training_curve.png'.")
+    save_versioned_file(curve_path)
+    print(f"Training loss curve saved to '{curve_path}'.")
 
     raw_dataset.close()
 

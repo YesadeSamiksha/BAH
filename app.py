@@ -14,7 +14,9 @@ import torchvision.transforms as transforms
 from PIL import Image
 
 from dataset import DSRSIDDataset
-from train_contrastive import ContrastiveModel, FREEZE_BACKBONE
+from train_contrastive import ContrastiveModel
+from config import DATASET_PATH, MODEL_DIR, EMBEDDING_DIR, FAISS_DIR, LOG_DIR, OUTPUT_DIR, FREEZE_BACKBONE
+import config
 
 # Page Configuration
 st.set_page_config(
@@ -149,61 +151,78 @@ MISMATCH_REASON = "Mismatched class features; retrieved due to similar shape out
 
 # Load cached data and models
 @st.cache_resource
-def load_resources():
+def load_resources(retrieval_mode):
     # Load dataset indices and instantiate DSRSIDDataset
-    indices_path = "subset_indices.npy"
+    indices_path = os.path.join(EMBEDDING_DIR, "subset_indices.npy")
     if not os.path.exists(indices_path):
-        st.error("Missing 'subset_indices.npy'! Please run extraction first.")
+        st.error(f"Missing '{indices_path}'! Please run extraction first.")
         st.stop()
         
     subset_indices = np.load(indices_path)
-    dataset = DSRSIDDataset(file_path="data/DSRSID.mat", indices=subset_indices)
+    dataset = DSRSIDDataset(file_path=DATASET_PATH, indices=subset_indices)
     
     # Load labels
-    labels = np.load("labels.npy")
+    labels_file = os.path.join(EMBEDDING_DIR, "labels.npy")
+    if not os.path.exists(labels_file):
+        st.error(f"Missing '{labels_file}'! Please run extraction first.")
+        st.stop()
+    labels = np.load(labels_file)
     
-    # Load Baseline Embeddings and FAISS Indices
-    base_pan_embs = np.load("pan_embeddings.npy")
-    base_mul_embs = np.load("mul_embeddings.npy")
-    base_pan_index = faiss.read_index("pan_index.bin")
-    base_mul_index = faiss.read_index("mul_index.bin")
-    
-    # Load Contrastive Embeddings and FAISS Indices
-    c_pan_embs = np.load("pan_embeddings_contrastive.npy")
-    c_mul_embs = np.load("mul_embeddings_contrastive.npy")
-    c_pan_index = faiss.read_index("pan_index_contrastive.bin")
-    c_mul_index = faiss.read_index("mul_index_contrastive.bin")
-    
-    # Load precomputed metrics JSON
-    metrics_file = "metrics_summary.json"
-    if os.path.exists(metrics_file):
-        with open(metrics_file, "r") as f:
-            metrics_summary = json.load(f)
+    if retrieval_mode == "baseline":
+        pan_embs = np.load(os.path.join(EMBEDDING_DIR, "pan_embeddings.npy"))
+        mul_embs = np.load(os.path.join(EMBEDDING_DIR, "mul_embeddings.npy"))
+        pan_index = faiss.read_index(os.path.join(FAISS_DIR, "pan_index.bin"))
+        mul_index = faiss.read_index(os.path.join(FAISS_DIR, "mul_index.bin"))
+        
+        # Load baseline model (standard pretrained ResNet18 with fc = nn.Identity)
+        from torchvision.models import resnet18, ResNet18_Weights
+        model = resnet18(weights=ResNet18_Weights.DEFAULT)
+        model.fc = nn.Identity()
+        model.eval()
+    elif retrieval_mode == "contrastive":
+        pan_embs = np.load(os.path.join(EMBEDDING_DIR, "pan_embeddings_contrastive.npy"))
+        mul_embs = np.load(os.path.join(EMBEDDING_DIR, "mul_embeddings_contrastive.npy"))
+        pan_index = faiss.read_index(os.path.join(FAISS_DIR, "pan_index_contrastive.bin"))
+        mul_index = faiss.read_index(os.path.join(FAISS_DIR, "mul_index_contrastive.bin"))
+        
+        # Load Trained Contrastive Model
+        model = ContrastiveModel(freeze_backbone=FREEZE_BACKBONE)
+        best_model_path = os.path.join(MODEL_DIR, "best_model.pth")
+        if os.path.exists(best_model_path):
+            model.load_state_dict(torch.load(best_model_path, map_location=torch.device('cpu')))
+        model.eval()
     else:
-        metrics_summary = {}
-
-    # Load Trained Contrastive Model
-    model = ContrastiveModel(freeze_backbone=FREEZE_BACKBONE)
-    if os.path.exists("best_model.pth"):
-        model.load_state_dict(torch.load("best_model.pth", map_location=torch.device('cpu')))
-    model.eval()
+        raise ValueError(f"Unknown retrieval mode: {retrieval_mode}")
 
     return {
         "dataset": dataset,
         "labels": labels,
-        "base_pan_embs": base_pan_embs,
-        "base_mul_embs": base_mul_embs,
-        "base_pan_index": base_pan_index,
-        "base_mul_index": base_mul_index,
-        "c_pan_embs": c_pan_embs,
-        "c_mul_embs": c_mul_embs,
-        "c_pan_index": c_pan_index,
-        "c_mul_index": c_mul_index,
-        "metrics_summary": metrics_summary,
+        "pan_embs": pan_embs,
+        "mul_embs": mul_embs,
+        "pan_index": pan_index,
+        "mul_index": mul_index,
         "model": model
     }
 
-res = load_resources()
+@st.cache_resource
+def load_metrics_summaries():
+    baseline_file = os.path.join(LOG_DIR, "metrics_summary_baseline.json")
+    contrastive_file = os.path.join(LOG_DIR, "metrics_summary_contrastive.json")
+    
+    baseline_metrics = {}
+    if os.path.exists(baseline_file):
+        with open(baseline_file, "r") as f:
+            baseline_metrics = json.load(f)
+            
+    contrastive_metrics = {}
+    if os.path.exists(contrastive_file):
+        with open(contrastive_file, "r") as f:
+            contrastive_metrics = json.load(f)
+            
+    return {
+        "baseline": baseline_metrics,
+        "contrastive": contrastive_metrics
+    }
 
 # Streamlit Title
 st.title("Cross-Modal Satellite Image Retrieval System")
@@ -220,6 +239,17 @@ tab_retrieval, tab_eval, tab_embeddings, tab_arch, tab_about = st.tabs([
 
 # Sidebar Controls
 st.sidebar.header("🔧 Retrieval Configuration")
+
+retrieval_model_option = st.sidebar.radio(
+    "Retrieval Model",
+    options=["Baseline", "Contrastive"],
+    index=1 if config.RETRIEVAL_MODE == "contrastive" else 0,
+    help="Switch between Baseline (512D L2) and Contrastive (128D Cosine) model representations."
+)
+active_mode = retrieval_model_option.lower()
+
+res = load_resources(active_mode)
+metrics_summaries = load_metrics_summaries()
 
 retrieval_mode = st.sidebar.selectbox(
     "Select Retrieval Mode",
@@ -240,16 +270,19 @@ st.sidebar.subheader("🚀 Demo Examples (One-Click)")
 cols_demo1, cols_demo2 = st.sidebar.columns(2)
 
 demo_idx = None
+num_samples = len(res["labels"])
+samples_per_class = num_samples // 8
+
 with cols_demo1:
     if st.button("🌲 Forest Example"):
-        demo_idx = 1500  # Class 3.0
+        demo_idx = int(2.4 * samples_per_class)  # In class 3.0
     if st.button("🏢 Urban Example"):
-        demo_idx = 2000  # Class 4.0
+        demo_idx = int(3.2 * samples_per_class)  # In class 4.0
 with cols_demo2:
     if st.button("🌊 Water Example"):
-        demo_idx = 4600  # Class 8.0
+        demo_idx = int(7.4 * samples_per_class)  # In class 8.0
     if st.button("🛣️ River Example"):
-        demo_idx = 4000  # Class 7.0
+        demo_idx = int(6.4 * samples_per_class)  # In class 7.0
 
 # ----------------- TAB 1: RETRIEVAL SANDBOX -----------------
 with tab_retrieval:
@@ -272,28 +305,30 @@ with tab_retrieval:
     latency_search = 0.0
 
     if query_source == "Dataset Index Mode":
-        st.markdown("Select a query index from the 5,000 stratified samples. Images and metadata will load from the DSRSID dataset.")
+        num_samples = len(res["labels"])
+        samples_per_class = num_samples // 8
+        st.markdown(f"Select a query index from the {num_samples:,} stratified samples. Images and metadata will load from the DSRSID dataset.")
         
         # User input for index
         query_idx = st.number_input(
-            "Dataset Sample Index (0 - 4999)", 
-            min_value=0, max_value=4999, 
+            f"Dataset Sample Index (0 - {num_samples - 1})", 
+            min_value=0, max_value=num_samples - 1, 
             value=query_idx,
             key='query_idx_input',
-            help="Select index. The 5000 samples are stratified (625 per class: 0-624 Class 1, 625-1249 Class 2, ...)"
+            help=f"Select index. The {num_samples} samples are stratified ({samples_per_class} per class: 0-{samples_per_class-1} Class 1, ...)"
         )
         
         # Load from dataset
         pan_pil, mul_pil, label_val = res["dataset"].get_visualization_images(query_idx)
         query_label_val = label_val
         
-        # Determine query image and pre-extracted contrastive embedding
+        # Determine query image and pre-extracted embedding
         if retrieval_mode.startswith("PAN"):
             query_image = pan_pil
-            query_embedding = res["c_pan_embs"][query_idx]
+            query_embedding = res["pan_embs"][query_idx]
         else:
             query_image = mul_pil
-            query_embedding = res["c_mul_embs"][query_idx]
+            query_embedding = res["mul_embs"][query_idx]
             
         latency_extract = 0.0  # Already pre-extracted!
         
@@ -320,16 +355,18 @@ with tab_retrieval:
             t0 = time.perf_counter()
             
             # Convert single channel to RGB if PAN
-            if retrieval_mode.startswith("PAN"):
-                img_rgb = query_image.convert("RGB")
-                img_tensor = preprocess(img_rgb).unsqueeze(0)
+            img_rgb = query_image.convert("RGB")
+            img_tensor = preprocess(img_rgb).unsqueeze(0)
+            
+            if active_mode == "baseline":
                 with torch.no_grad():
-                    emb_torch = res["model"].forward_pan(img_tensor)
-            else:  # MUL upload
-                img_rgb = query_image.convert("RGB")
-                img_tensor = preprocess(img_rgb).unsqueeze(0)
+                    emb_torch = res["model"](img_tensor)
+            else:
                 with torch.no_grad():
-                    emb_torch = res["model"].forward_mul(img_tensor)
+                    if retrieval_mode.startswith("PAN"):
+                        emb_torch = res["model"].forward_pan(img_tensor)
+                    else:
+                        emb_torch = res["model"].forward_mul(img_tensor)
                     
             query_embedding = emb_torch.squeeze(0).numpy()
             
@@ -345,7 +382,7 @@ with tab_retrieval:
     # Perform Search if Query is loaded
     if query_embedding is not None:
         # Determine target index and mode parameters
-        target_index = res["c_mul_index"] if retrieval_mode.endswith("MUL") else res["c_pan_index"]
+        target_index = res["mul_index"] if retrieval_mode.endswith("MUL") else res["pan_index"]
         target_modality = "MUL" if retrieval_mode.endswith("MUL") else "PAN"
         
         # Execute search and measure FAISS search latency
@@ -415,13 +452,20 @@ with tab_retrieval:
                 # Dynamic explainable AI reason
                 reason_text = REASONS.get(ret_class_name, MISMATCH_REASON) if is_match else MISMATCH_REASON
                 
+                if active_mode == "baseline":
+                    score_html = f"<b>Dist:</b> {similarity:.3f}"
+                    score_header = "L2_Distance"
+                else:
+                    score_html = f"<b>Sim:</b> {(similarity*100):.1f}%"
+                    score_header = "Similarity_Score"
+
                 with res_cols[r]:
                     st.image(ret_img, use_container_width=True)
                     st.markdown(f"""
                     <div class="result-card {card_class}">
                         <div style="font-weight: bold; font-size: 0.95rem;">Rank {r+1}</div>
                         <div class="result-meta">
-                            <b>Sim:</b> {(similarity*100):.1f}%<br>
+                            {score_html}<br>
                             <b>Class:</b> {ret_class_name}<br>
                             <b>Index:</b> {ret_idx}
                         </div>
@@ -435,14 +479,15 @@ with tab_retrieval:
                 csv_data.append({
                     "Rank": r + 1,
                     "Dataset_Index": ret_idx,
-                    "Similarity_Score": f"{similarity:.5f}",
+                    score_header: f"{similarity:.5f}",
                     "Class_Label": ret_class_name,
                     "Is_Correct": "Yes" if is_match else "No"
                 })
 
             # Create download CSV button
             csv_buffer = io.StringIO()
-            writer = csv.DictWriter(csv_buffer, fieldnames=["Rank", "Dataset_Index", "Similarity_Score", "Class_Label", "Is_Correct"])
+            score_header = "L2_Distance" if active_mode == "baseline" else "Similarity_Score"
+            writer = csv.DictWriter(csv_buffer, fieldnames=["Rank", "Dataset_Index", score_header, "Class_Label", "Is_Correct"])
             writer.writeheader()
             writer.writerows(csv_data)
             
@@ -460,7 +505,7 @@ with tab_eval:
     st.markdown("Comparison between the **Baseline 512D (L2)** and the **Supervised Contrastive 128D (Cosine)** models over all 5,000 stratified queries.")
     
     # Load metrics summaries
-    ms = res["metrics_summary"]
+    ms = metrics_summaries
     
     if not ms:
         st.warning("No pre-computed metrics found. Run 'precompute_metrics.py' to generate.")
@@ -548,14 +593,17 @@ with tab_eval:
                     # 1. Measure Embedding extraction
                     t0 = time.perf_counter()
                     with torch.no_grad():
-                        _ = res["model"].forward_pan(dummy_tensor)
+                        if active_mode == "baseline":
+                            _ = res["model"](dummy_tensor)
+                        else:
+                            _ = res["model"].forward_pan(dummy_tensor)
                     t1 = time.perf_counter()
                     ext_times.append((t1 - t0) * 1000.0)
                     
                     # 2. Measure FAISS Search
-                    q_emb = res["c_pan_embs"][test_idx].reshape(1, -1).astype('float32')
+                    q_emb = res["pan_embs"][test_idx].reshape(1, -1).astype('float32')
                     t0 = time.perf_counter()
-                    _, _ = res["c_mul_index"].search(q_emb, 5)
+                    _, _ = res["mul_index"].search(q_emb, 5)
                     t1 = time.perf_counter()
                     search_times.append((t1 - t0) * 1000.0)
                     
@@ -579,16 +627,18 @@ with tab_embeddings:
     
     with col_tsne_before:
         st.markdown("##### ❌ Before Contrastive Training (Baseline 512D)")
-        if os.path.exists("embeddings_tsne_before.png"):
-            st.image("embeddings_tsne_before.png", use_container_width=True)
+        before_tsne_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_before.png")
+        if os.path.exists(before_tsne_path):
+            st.image(before_tsne_path, use_container_width=True)
             st.markdown("<p style='font-size:0.85rem; color:#94A3B8; text-align:center;'>Modalities are completely separated. PAN and MUL representations of the same class do not align in the shared space.</p>", unsafe_allow_html=True)
         else:
             st.info("Missing 'embeddings_tsne_before.png' image.")
             
     with col_tsne_after:
         st.markdown("##### ✅ After Supervised Contrastive Training (Aligned 128D)")
-        if os.path.exists("embeddings_tsne_after.png"):
-            st.image("embeddings_tsne_after.png", use_container_width=True)
+        after_tsne_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_after.png")
+        if os.path.exists(after_tsne_path):
+            st.image(after_tsne_path, use_container_width=True)
             st.markdown("<p style='font-size:0.85rem; color:#94A3B8; text-align:center;'>PAN and MUL representations of the same classes merge and overlap, showing successful cross-modal alignment.</p>", unsafe_allow_html=True)
         else:
             st.info("Missing 'embeddings_tsne_after.png' image.")

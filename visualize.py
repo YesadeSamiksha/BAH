@@ -1,7 +1,9 @@
 import h5py
 import matplotlib.pyplot as plt
 
-with h5py.File("data/DSRSID.mat", "r") as f:
+from config import DATASET_PATH
+
+with h5py.File(DATASET_PATH, "r") as f:
 
     pan = f["PAN_IMAGES"]
     mul = f["MUL_IMAGES"]

@@ -1,8 +1,10 @@
 from scipy.io import loadmat
 
+from config import DATASET_PATH
+
 print("Loading dataset...")
 
-data = loadmat("data/DSRSID.mat")
+data = loadmat(DATASET_PATH)
 
 print("\nKeys:")
 print(data.keys())

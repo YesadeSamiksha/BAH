@@ -7,35 +7,39 @@ import numpy as np
 from tqdm import tqdm
 
 from dataset import DSRSIDDataset
+from config import DATASET_PATH, EMBEDDING_DIR, BATCH_SIZE, USE_FULL_DATASET, save_versioned_file
 
 def main():
     # 1. Compute and save stratified indices for reproducibility
     # Dataset has 8 classes, each has exactly 10,000 contiguous samples.
     # We sample the first 625 images from each class (8 * 625 = 5000 samples total).
+    # If USE_FULL_DATASET is True, we sample all 10000 images from each class (80000 samples total).
     print("Computing stratified subset indices...")
     subset_indices = []
     num_classes = 8
     samples_per_class = 10000
-    subsample_limit = 625
+    subsample_limit = 10000 if USE_FULL_DATASET else 625
 
     for c in range(num_classes):
         start_idx = c * samples_per_class
         subset_indices.extend(list(range(start_idx, start_idx + subsample_limit)))
         
     subset_indices = np.array(subset_indices, dtype=np.int32)
-    np.save("subset_indices.npy", subset_indices)
-    print(f"Stratified indices saved to 'subset_indices.npy' (Total: {len(subset_indices)}).")
+    indices_path = os.path.join(EMBEDDING_DIR, "subset_indices.npy")
+    np.save(indices_path, subset_indices)
+    save_versioned_file(indices_path)
+    print(f"Stratified indices saved to '{indices_path}' (Total: {len(subset_indices)}).")
 
     # 2. Instantiate custom dataset and dataloader
-    dataset_path = "data/DSRSID.mat"
+    dataset_path = DATASET_PATH
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Dataset file not found at: {dataset_path}")
         
     print(f"Loading dataset from: {dataset_path}...")
     dataset = DSRSIDDataset(file_path=dataset_path, indices=subset_indices)
     
-    # Using batch_size=64, num_workers=0 is safe for h5py on Windows to avoid process-pickling issues
-    dataloader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0)
+    # Using dynamic BATCH_SIZE; num_workers=0 is safe for h5py on Windows to avoid process-pickling issues
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     # 3. Load pretrained ResNet18 model
     print("Initializing pretrained ResNet18 model...")
@@ -85,14 +89,22 @@ def main():
     labels = np.concatenate(labels_list, axis=0)
 
     # 5. Save the embeddings and class labels
-    np.save("pan_embeddings.npy", pan_embeddings)
-    np.save("mul_embeddings.npy", mul_embeddings)
-    np.save("labels.npy", labels)
+    pan_embeddings_path = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
+    mul_embeddings_path = os.path.join(EMBEDDING_DIR, "mul_embeddings.npy")
+    labels_path = os.path.join(EMBEDDING_DIR, "labels.npy")
+
+    np.save(pan_embeddings_path, pan_embeddings)
+    np.save(mul_embeddings_path, mul_embeddings)
+    np.save(labels_path, labels)
+
+    save_versioned_file(pan_embeddings_path)
+    save_versioned_file(mul_embeddings_path)
+    save_versioned_file(labels_path)
 
     print("\nFeature extraction completed successfully!")
-    print(f"Saved 'pan_embeddings.npy' of shape: {pan_embeddings.shape}")
-    print(f"Saved 'mul_embeddings.npy' of shape: {mul_embeddings.shape}")
-    print(f"Saved 'labels.npy' of shape: {labels.shape}")
+    print(f"Saved '{pan_embeddings_path}' of shape: {pan_embeddings.shape}")
+    print(f"Saved '{mul_embeddings_path}' of shape: {mul_embeddings.shape}")
+    print(f"Saved '{labels_path}' of shape: {labels.shape}")
 
     # TODO: Experiment with all 4 spectral channels during advanced training phase
     # (Currently, only the first 3 channels are used as RGB input for feature extraction and visualization).

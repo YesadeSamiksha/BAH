@@ -1,10 +1,11 @@
 import os
 import numpy as np
 import faiss
+from config import EMBEDDING_DIR, FAISS_DIR, save_versioned_file
 
 def main():
-    pan_embeddings_path = "pan_embeddings.npy"
-    mul_embeddings_path = "mul_embeddings.npy"
+    pan_embeddings_path = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
+    mul_embeddings_path = os.path.join(EMBEDDING_DIR, "mul_embeddings.npy")
 
     # 1. Load the extracted embeddings
     if not os.path.exists(pan_embeddings_path) or not os.path.exists(mul_embeddings_path):
@@ -41,13 +42,15 @@ def main():
     print(f"Total vectors in MUL index: {mul_index.ntotal}")
 
     # 4. Save the built indices to disk
-    pan_index_file = "pan_index.bin"
-    mul_index_file = "mul_index.bin"
+    pan_index_file = os.path.join(FAISS_DIR, "pan_index.bin")
+    mul_index_file = os.path.join(FAISS_DIR, "mul_index.bin")
     
     print(f"\nSaving PAN FAISS index to: {pan_index_file}...")
     faiss.write_index(pan_index, pan_index_file)
+    save_versioned_file(pan_index_file)
     print(f"Saving MUL FAISS index to: {mul_index_file}...")
     faiss.write_index(mul_index, mul_index_file)
+    save_versioned_file(mul_index_file)
 
     print("\nFAISS Indexing completed successfully!")
 
