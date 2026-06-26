@@ -1,0 +1,75 @@
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+sat_env/
+venv/
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# ==========================
+# Model Checkpoints
+# ==========================
+*.pth
+*.pt
+*.ckpt
+
+# ==========================
+# FAISS Indexes
+# ==========================
+*.bin
+
+# ==========================
+# NumPy Arrays
+# ==========================
+*.npy
+
+# ==========================
+# Logs
+# ==========================
+*.log
+
+# ==========================
+# Training Outputs
+# ==========================
+train_loss.csv
+metrics_summary.json
+
+# ==========================
+# Generated Images
+# ==========================
+*.png
+
+# ==========================
+# Jupyter
+# ==========================
+.ipynb_checkpoints/
+# Datasets
+data/
+*.h5
+*.hdf5
+*.tif
+*.tiff
+
+# Model outputs
+checkpoints/
+outputs/
+runs/
+
+# Large embedding/index files
+*.npy
+*.npz
+*.bin
+*.pth
