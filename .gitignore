@@ -74,3 +74,24 @@ runs/
 *.npz
 *.bin
 *.pth
+
+# Generated experiments
+experiments/
+
+# Models
+*.pth
+*.onnx
+*.onnx.data
+
+# Embeddings
+*.npy
+
+# FAISS
+*.bin
+
+# Logs and outputs
+logs/
+outputs/
+embeddings/
+faiss_indices/
+checkpoints/

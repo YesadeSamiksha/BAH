@@ -14,8 +14,8 @@ import torchvision.transforms as transforms
 from PIL import Image
 
 from dataset import DSRSIDDataset
-from train_contrastive import ContrastiveModel
-from config import DATASET_PATH, MODEL_DIR, EMBEDDING_DIR, FAISS_DIR, LOG_DIR, OUTPUT_DIR, FREEZE_BACKBONE
+from train_contrastive import ContrastiveModel, get_backbone_model
+from config import DATASET_PATH, STORAGE_ROOT, FREEZE_BACKBONE
 import config
 
 # Page Configuration
@@ -120,7 +120,6 @@ st.markdown("""
         border-radius: 4px;
         font-family: monospace;
     }
-
 </style>
 """, unsafe_allow_html=True)
 
@@ -149,45 +148,81 @@ REASONS = {
 
 MISMATCH_REASON = "Mismatched class features; retrieved due to similar shape outlines, coarse structural silhouettes, or low-level sensor reflectance overlaps."
 
-# Load cached data and models
+def list_available_experiments():
+    exp_root = os.path.join(STORAGE_ROOT, "experiments")
+    if not os.path.exists(exp_root):
+        return []
+    exps = []
+    for name in os.listdir(exp_root):
+        path = os.path.join(exp_root, name)
+        if name in ["pipeline_states", "pipeline_state"]:
+            continue
+        if os.path.isdir(path):
+            exps.append(name)
+    return exps
+
+def get_default_experiment_name():
+    return f"{config.BACKBONE}_{config.FAISS_INDEX.lower()}"
+
+def get_exp_paths(exp_name):
+    exp_dir = os.path.join(STORAGE_ROOT, "experiments", exp_name)
+    return {
+        "MODEL_DIR": os.path.join(exp_dir, "models"),
+        "CHECKPOINT_DIR": os.path.join(exp_dir, "checkpoints"),
+        "EMBEDDING_DIR": os.path.join(exp_dir, "embeddings"),
+        "FAISS_DIR": os.path.join(exp_dir, "faiss_indices"),
+        "LOG_DIR": os.path.join(exp_dir, "logs"),
+        "OUTPUT_DIR": os.path.join(exp_dir, "outputs")
+    }
+
+# Load cached data and models dynamically
 @st.cache_resource
-def load_resources(retrieval_mode):
-    # Load dataset indices and instantiate DSRSIDDataset
-    indices_path = os.path.join(EMBEDDING_DIR, "subset_indices.npy")
+def load_resources(exp_name, retrieval_mode):
+    paths = get_exp_paths(exp_name)
+    emb_dir = paths["EMBEDDING_DIR"]
+    faiss_dir = paths["FAISS_DIR"]
+    model_dir = paths["MODEL_DIR"]
+
+    indices_path = os.path.join(emb_dir, "subset_indices.npy")
     if not os.path.exists(indices_path):
-        st.error(f"Missing '{indices_path}'! Please run extraction first.")
+        st.error(f"Missing '{indices_path}'! Please run extraction for run '{exp_name}' first.")
         st.stop()
         
     subset_indices = np.load(indices_path)
     dataset = DSRSIDDataset(file_path=DATASET_PATH, indices=subset_indices)
     
-    # Load labels
-    labels_file = os.path.join(EMBEDDING_DIR, "labels.npy")
+    labels_file = os.path.join(emb_dir, "labels.npy")
     if not os.path.exists(labels_file):
-        st.error(f"Missing '{labels_file}'! Please run extraction first.")
+        st.error(f"Missing '{labels_file}'! Please run extraction for run '{exp_name}' first.")
         st.stop()
     labels = np.load(labels_file)
     
+    # Extract backbone name from experiment folder name (e.g. resnet50_hnsw -> resnet50)
+    backbone_name = exp_name.split("_")[0]
+    
     if retrieval_mode == "baseline":
-        pan_embs = np.load(os.path.join(EMBEDDING_DIR, "pan_embeddings.npy"))
-        mul_embs = np.load(os.path.join(EMBEDDING_DIR, "mul_embeddings.npy"))
-        pan_index = faiss.read_index(os.path.join(FAISS_DIR, "pan_index.bin"))
-        mul_index = faiss.read_index(os.path.join(FAISS_DIR, "mul_index.bin"))
+        pan_embs = np.load(os.path.join(emb_dir, "pan_embeddings.npy"), mmap_mode='r')
+        mul_embs = np.load(os.path.join(emb_dir, "mul_embeddings.npy"), mmap_mode='r')
+        pan_index = faiss.read_index(os.path.join(faiss_dir, "pan_index.bin"))
+        mul_index = faiss.read_index(os.path.join(faiss_dir, "mul_index.bin"))
         
-        # Load baseline model (standard pretrained ResNet18 with fc = nn.Identity)
-        from torchvision.models import resnet18, ResNet18_Weights
-        model = resnet18(weights=ResNet18_Weights.DEFAULT)
-        model.fc = nn.Identity()
+        # Load baseline model dynamically
+        model, feature_dim = get_backbone_model(backbone_name)
         model.eval()
     elif retrieval_mode == "contrastive":
-        pan_embs = np.load(os.path.join(EMBEDDING_DIR, "pan_embeddings_contrastive.npy"))
-        mul_embs = np.load(os.path.join(EMBEDDING_DIR, "mul_embeddings_contrastive.npy"))
-        pan_index = faiss.read_index(os.path.join(FAISS_DIR, "pan_index_contrastive.bin"))
-        mul_index = faiss.read_index(os.path.join(FAISS_DIR, "mul_index_contrastive.bin"))
+        pan_embs = np.load(os.path.join(emb_dir, "pan_embeddings_contrastive.npy"), mmap_mode='r')
+        mul_embs = np.load(os.path.join(emb_dir, "mul_embeddings_contrastive.npy"), mmap_mode='r')
+        pan_index = faiss.read_index(os.path.join(faiss_dir, "pan_index_contrastive.bin"))
+        mul_index = faiss.read_index(os.path.join(faiss_dir, "mul_index_contrastive.bin"))
         
-        # Load Trained Contrastive Model
+        # Dynamically instantiate ContrastiveModel using target backbone
+        # We override config.BACKBONE inside the context to avoid circular issues
+        old_backbone = config.BACKBONE
+        config.BACKBONE = backbone_name
         model = ContrastiveModel(freeze_backbone=FREEZE_BACKBONE)
-        best_model_path = os.path.join(MODEL_DIR, "best_model.pth")
+        config.BACKBONE = old_backbone
+        
+        best_model_path = os.path.join(model_dir, "best_model.pth")
         if os.path.exists(best_model_path):
             model.load_state_dict(torch.load(best_model_path, map_location=torch.device('cpu')))
         model.eval()
@@ -201,13 +236,18 @@ def load_resources(retrieval_mode):
         "mul_embs": mul_embs,
         "pan_index": pan_index,
         "mul_index": mul_index,
-        "model": model
+        "model": model,
+        "feature_dim": pan_embs.shape[1],
+        "backbone_name": backbone_name
     }
 
 @st.cache_resource
-def load_metrics_summaries():
-    baseline_file = os.path.join(LOG_DIR, "metrics_summary_baseline.json")
-    contrastive_file = os.path.join(LOG_DIR, "metrics_summary_contrastive.json")
+def load_metrics_summaries(exp_name):
+    paths = get_exp_paths(exp_name)
+    log_dir = paths["LOG_DIR"]
+    
+    baseline_file = os.path.join(log_dir, "metrics_summary_baseline.json")
+    contrastive_file = os.path.join(log_dir, "metrics_summary_contrastive.json")
     
     baseline_metrics = {}
     if os.path.exists(baseline_file):
@@ -228,28 +268,34 @@ def load_metrics_summaries():
 st.title("Cross-Modal Satellite Image Retrieval System")
 st.markdown("##### *Aligning Panchromatic & Multispectral Satellite Data with Supervised Contrastive Learning*")
 
-# Tabs Layout
-tab_retrieval, tab_eval, tab_embeddings, tab_arch, tab_about = st.tabs([
-    "🔍 Retrieval Sandbox", 
-    "📈 Performance Dashboard", 
-    "🔮 t-SNE Embeddings", 
-    "🏗️ Pipeline Architecture", 
-    "📋 About Project"
-])
+# Discover and load experiments
+available_exps = list_available_experiments()
+default_name = get_default_experiment_name()
+if default_name not in available_exps:
+    available_exps.append(default_name)
 
 # Sidebar Controls
-st.sidebar.header("🔧 Retrieval Configuration")
+st.sidebar.header("🔧 Experiment Run Configuration")
+selected_exp = st.sidebar.selectbox(
+    "Select Experiment Run",
+    options=available_exps,
+    index=available_exps.index(default_name) if default_name in available_exps else 0,
+    help="Select which experiment configuration (backbone and FAISS index type) to load."
+)
 
+paths = get_exp_paths(selected_exp)
+
+# Sidebar - Retrieval Mode configuration
 retrieval_model_option = st.sidebar.radio(
     "Retrieval Model",
     options=["Baseline", "Contrastive"],
-    index=1 if config.RETRIEVAL_MODE == "contrastive" else 0,
-    help="Switch between Baseline (512D L2) and Contrastive (128D Cosine) model representations."
+    index=1,
+    help="Switch between Baseline and Contrastive model representations."
 )
 active_mode = retrieval_model_option.lower()
 
-res = load_resources(active_mode)
-metrics_summaries = load_metrics_summaries()
+res = load_resources(selected_exp, active_mode)
+metrics_summaries = load_metrics_summaries(selected_exp)
 
 retrieval_mode = st.sidebar.selectbox(
     "Select Retrieval Mode",
@@ -264,6 +310,32 @@ query_source = st.sidebar.radio(
     index=0
 )
 
+# Load experiment metadata if it exists
+metadata_file = os.path.join(paths["MODEL_DIR"], "..", "experiment.json")
+metadata = {}
+if os.path.exists(metadata_file):
+    try:
+        with open(metadata_file, "r") as f:
+            metadata = json.load(f)
+    except Exception:
+        pass
+
+# Display Experiment Info in Sidebar
+st.sidebar.markdown("---")
+st.sidebar.subheader("📋 Active Experiment Details")
+if metadata:
+    st.sidebar.markdown(f"""
+    **Dataset**: `{metadata.get('dataset', 'DSRSID')}` ({metadata.get('dataset_size', 5000):,} samples)  
+    **Backbone**: `{metadata.get('backbone', 'resnet18').upper()}`  
+    **Feature Dim**: `{metadata.get('feature_dimension', 512)}`  
+    **Projection Dim**: `{metadata.get('projection_dimension', 128)}`  
+    **Index Type**: `{metadata.get('faiss', 'HNSW')}`  
+    **Freeze Backbone**: `{metadata.get('freeze_backbone', True)}`  
+    **Training Date**: `{metadata.get('timestamp', 'N/A')}`  
+    """)
+else:
+    st.sidebar.info("No experiment.json metadata found for this run.")
+
 # Demo Mode Shortcut Selector
 st.sidebar.markdown("---")
 st.sidebar.subheader("🚀 Demo Examples (One-Click)")
@@ -275,24 +347,31 @@ samples_per_class = num_samples // 8
 
 with cols_demo1:
     if st.button("🌲 Forest Example"):
-        demo_idx = int(2.4 * samples_per_class)  # In class 3.0
+        demo_idx = int(2.4 * samples_per_class)
     if st.button("🏢 Urban Example"):
-        demo_idx = int(3.2 * samples_per_class)  # In class 4.0
+        demo_idx = int(3.2 * samples_per_class)
 with cols_demo2:
     if st.button("🌊 Water Example"):
-        demo_idx = int(7.4 * samples_per_class)  # In class 8.0
+        demo_idx = int(7.4 * samples_per_class)
     if st.button("🛣️ River Example"):
-        demo_idx = int(6.4 * samples_per_class)  # In class 7.0
+        demo_idx = int(6.4 * samples_per_class)
+
+# Tabs Layout
+tab_retrieval, tab_eval, tab_embeddings, tab_arch, tab_about = st.tabs([
+    "🔍 Retrieval Sandbox", 
+    "📈 Performance Dashboard", 
+    "🔮 t-SNE Embeddings", 
+    "🏗️ Pipeline Architecture", 
+    "📋 About Project"
+])
 
 # ----------------- TAB 1: RETRIEVAL SANDBOX -----------------
 with tab_retrieval:
     st.subheader("Interactive Query Interface")
     
-    # Initialize query index in session state if not set
     if 'query_idx_input' not in st.session_state:
         st.session_state.query_idx_input = 1500
 
-    # Override session state index if a demo example button was clicked
     if demo_idx is not None:
         st.session_state.query_idx_input = demo_idx
         
@@ -305,11 +384,8 @@ with tab_retrieval:
     latency_search = 0.0
 
     if query_source == "Dataset Index Mode":
-        num_samples = len(res["labels"])
-        samples_per_class = num_samples // 8
         st.markdown(f"Select a query index from the {num_samples:,} stratified samples. Images and metadata will load from the DSRSID dataset.")
         
-        # User input for index
         query_idx = st.number_input(
             f"Dataset Sample Index (0 - {num_samples - 1})", 
             min_value=0, max_value=num_samples - 1, 
@@ -318,11 +394,9 @@ with tab_retrieval:
             help=f"Select index. The {num_samples} samples are stratified ({samples_per_class} per class: 0-{samples_per_class-1} Class 1, ...)"
         )
         
-        # Load from dataset
         pan_pil, mul_pil, label_val = res["dataset"].get_visualization_images(query_idx)
         query_label_val = label_val
         
-        # Determine query image and pre-extracted embedding
         if retrieval_mode.startswith("PAN"):
             query_image = pan_pil
             query_embedding = res["pan_embs"][query_idx]
@@ -330,10 +404,10 @@ with tab_retrieval:
             query_image = mul_pil
             query_embedding = res["mul_embs"][query_idx]
             
-        latency_extract = 0.0  # Already pre-extracted!
+        latency_extract = 0.0
         
     else:  # File Upload Mode
-        st.markdown("Upload a custom satellite image (PAN or MUL RGB visualization) to perform real-time encoder inference and retrieval.")
+        st.markdown("Upload a custom satellite image to perform real-time encoder inference and retrieval.")
         
         uploaded_file = st.file_uploader(
             f"Upload {'Panchromatic' if retrieval_mode.startswith('PAN') else 'Multispectral RGB'} Image",
@@ -341,20 +415,15 @@ with tab_retrieval:
         )
         
         if uploaded_file is not None:
-            # Load and display uploaded image
             query_image = Image.open(uploaded_file)
             
-            # Setup torch preprocess transform
             preprocess = transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
             
-            # Perform inference and measure latency
             t0 = time.perf_counter()
-            
-            # Convert single channel to RGB if PAN
             img_rgb = query_image.convert("RGB")
             img_tensor = preprocess(img_rgb).unsqueeze(0)
             
@@ -369,27 +438,21 @@ with tab_retrieval:
                         emb_torch = res["model"].forward_mul(img_tensor)
                     
             query_embedding = emb_torch.squeeze(0).numpy()
-            
-            # Normalize embedding
-            query_embedding = query_embedding / np.linalg.norm(query_embedding)
+            query_embedding = query_embedding / (np.linalg.norm(query_embedding) + 1e-8)
             
             t1 = time.perf_counter()
-            latency_extract = (t1 - t0) * 1000.0  # in ms
-            query_label_val = None  # Custom upload has no ground truth label in the dataset
+            latency_extract = (t1 - t0) * 1000.0
+            query_label_val = None
         else:
             st.info("Please upload an image file to perform retrieval.")
             
-    # Perform Search if Query is loaded
     if query_embedding is not None:
-        # Determine target index and mode parameters
         target_index = res["mul_index"] if retrieval_mode.endswith("MUL") else res["pan_index"]
         target_modality = "MUL" if retrieval_mode.endswith("MUL") else "PAN"
         
-        # Execute search and measure FAISS search latency
         t0 = time.perf_counter()
         query_vector = query_embedding.reshape(1, -1).astype('float32')
         
-        # If dataset query mode, we exclude the self index from search results
         exclude_self_idx = query_idx if query_source == "Dataset Index Mode" else None
         search_k = 6 if exclude_self_idx is not None else 5
         
@@ -408,9 +471,8 @@ with tab_retrieval:
                 break
                 
         t1 = time.perf_counter()
-        latency_search = (t1 - t0) * 1000.0  # in ms
+        latency_search = (t1 - t0) * 1000.0
         
-        # Layout: Left for Query, Right for Top-5 Retrieved results
         col_query, col_results = st.columns([1, 3])
         
         with col_query:
@@ -421,7 +483,6 @@ with tab_retrieval:
             st.markdown(f"**Modality**: `{retrieval_mode.split('→')[0].strip()}`")
             st.markdown(f"**Class Label**: `{label_text}`")
             
-            # Latency statistics box
             st.markdown("##### ⏱️ Retrieval Latency")
             latency_total = latency_extract + latency_search
             st.markdown(f"""
@@ -439,20 +500,20 @@ with tab_retrieval:
             csv_data = []
             
             for r, (ret_idx, similarity) in enumerate(zip(retrieved_idxs, retrieved_sims)):
-                # Load retrieved images from dataset
                 ret_pan_pil, ret_mul_pil, ret_lbl_val = res["dataset"].get_visualization_images(ret_idx)
                 ret_img = ret_mul_pil if target_modality == "MUL" else ret_pan_pil
                 ret_class_name = CLASSES.get(ret_lbl_val, "Unknown")
                 
-                # Check match correctness
                 is_match = (query_label_val is not None and ret_lbl_val == query_label_val)
                 card_class = "result-correct" if is_match else "result-incorrect"
                 match_label = "✅ Match" if is_match else "❌ Mismatch"
                 
-                # Dynamic explainable AI reason
                 reason_text = REASONS.get(ret_class_name, MISMATCH_REASON) if is_match else MISMATCH_REASON
                 
+                # Check metric display representation
+                is_ip = isinstance(target_index, (faiss.IndexFlatIP, faiss.IndexHNSWFlat)) # Approximate cosine metric types
                 if active_mode == "baseline":
+                    # If baseline FlatL2 was built
                     score_html = f"<b>Dist:</b> {similarity:.3f}"
                     score_header = "L2_Distance"
                 else:
@@ -484,7 +545,6 @@ with tab_retrieval:
                     "Is_Correct": "Yes" if is_match else "No"
                 })
 
-            # Create download CSV button
             csv_buffer = io.StringIO()
             score_header = "L2_Distance" if active_mode == "baseline" else "Similarity_Score"
             writer = csv.DictWriter(csv_buffer, fieldnames=["Rank", "Dataset_Index", score_header, "Class_Label", "Is_Correct"])
@@ -502,15 +562,13 @@ with tab_retrieval:
 # ----------------- TAB 2: PERFORMANCE DASHBOARD -----------------
 with tab_eval:
     st.subheader("Model Performance & Evaluation Dashboard")
-    st.markdown("Comparison between the **Baseline 512D (L2)** and the **Supervised Contrastive 128D (Cosine)** models over all 5,000 stratified queries.")
+    st.markdown(f"Comparison between the **Baseline {res['feature_dim']}D (L2)** and the **Supervised Contrastive 128D (Cosine)** models for experiment run `{selected_exp}`.")
     
-    # Load metrics summaries
     ms = metrics_summaries
     
-    if not ms:
+    if not ms or "baseline" not in ms or not ms["baseline"]:
         st.warning("No pre-computed metrics found. Run 'precompute_metrics.py' to generate.")
     else:
-        # Grouped Mode Cards with st.metric highlighting Before vs After
         st.markdown("#### ⚡ Before vs. After Contrastive Learning")
         
         eval_cols = st.columns(4)
@@ -542,14 +600,12 @@ with tab_eval:
                 
                 st.markdown(f"**Baseline**: `{b_p5:.2f}%`  \n**mAP@5**: `{ms['contrastive'][key]['map_5']*100:.2f}%`  \n**mAP@10**: `{ms['contrastive'][key]['map_10']*100:.2f}%`")
                 
-        # st.bar_chart Grouped Chart
         st.markdown("---")
         st.markdown("#### 📊 Precision@5 Retrieval Mode Comparison")
         
-        # Create Data for bar chart
         chart_data = {
             "Retrieval Mode": ["PAN→PAN", "MUL→MUL", "PAN→MUL", "MUL→PAN"],
-            "Baseline (512D L2)": [
+            f"Baseline ({res['feature_dim']}D L2)": [
                 ms["baseline"]["PAN_PAN"]["precision_5"] * 100,
                 ms["baseline"]["MUL_MUL"]["precision_5"] * 100,
                 ms["baseline"]["PAN_MUL"]["precision_5"] * 100,
@@ -566,20 +622,35 @@ with tab_eval:
         df_chart = pd.DataFrame(chart_data).set_index("Retrieval Mode")
         st.bar_chart(df_chart, height=350)
         
-        # Dynamic Latency Benchmark Card
+        # Load local engineering benchmark if available
+        benchmark_file = os.path.join(paths["LOG_DIR"], "retrieval_benchmark.json")
+        if os.path.exists(benchmark_file):
+            st.markdown("---")
+            st.markdown("#### ⚙️ Engineering Retrieval Performance Benchmarks")
+            with open(benchmark_file, "r") as bf:
+                b_data = json.load(bf)
+            
+            bench_cols = st.columns(4)
+            with bench_cols[0]:
+                st.metric("Avg Search Latency", f"{b_data.get('avg_search_latency_ms', 0.0):.4f} ms")
+            with bench_cols[1]:
+                st.metric("Queries Per Second (QPS)", f"{b_data.get('queries_per_second', 0.0):.1f}")
+            with bench_cols[2]:
+                st.metric("FAISS Index Type", f"{b_data.get('mul_resolved_index_type', 'HNSW')}")
+            with bench_cols[3]:
+                st.metric("Index Size (MUL)", f"{b_data.get('mul_index_file_size_bytes', 0) / (1024**2):.2f} MB")
+
+        # Dynamic CPU Latency Benchmark
         st.markdown("---")
         st.markdown("#### ⏱️ Real-Time Local CPU Latency Benchmarking")
         
-        # Setup run benchmark button
         if st.button("⚡ Run CPU Latency Benchmark (20 Queries)"):
             with st.spinner("Running search benchmarks on CPU..."):
                 ext_times = []
                 search_times = []
                 
-                # Select 20 random indices
                 random_idxs = np.random.choice(5000, 20, replace=False)
                 
-                # Setup a test image tensor for extraction time
                 preprocess = transforms.Compose([
                     transforms.Resize((224, 224)),
                     transforms.ToTensor(),
@@ -588,9 +659,7 @@ with tab_eval:
                 dummy_pil = Image.fromarray(np.zeros((256, 256, 3), dtype=np.uint8))
                 dummy_tensor = preprocess(dummy_pil).unsqueeze(0)
                 
-                # Benchmark loop
                 for test_idx in random_idxs:
-                    # 1. Measure Embedding extraction
                     t0 = time.perf_counter()
                     with torch.no_grad():
                         if active_mode == "baseline":
@@ -600,7 +669,6 @@ with tab_eval:
                     t1 = time.perf_counter()
                     ext_times.append((t1 - t0) * 1000.0)
                     
-                    # 2. Measure FAISS Search
                     q_emb = res["pan_embs"][test_idx].reshape(1, -1).astype('float32')
                     t0 = time.perf_counter()
                     _, _ = res["mul_index"].search(q_emb, 5)
@@ -614,9 +682,9 @@ with tab_eval:
                 
                 cols_lat = st.columns(2)
                 with cols_lat[0]:
-                    st.metric("Avg Embedding Extraction Time", f"{avg_ext:.2f} ms", help="Time taken by ResNet18 + Projection Head forward pass on CPU.")
+                    st.metric("Avg Embedding Extraction Time", f"{avg_ext:.2f} ms", help=f"Time taken by {res['backbone_name'].upper()} + Projection Head forward pass on CPU.")
                 with cols_lat[1]:
-                    st.metric("Avg FAISS Index Search Time", f"{avg_search:.2f} ms", help="Time taken by IndexFlatIP search for 128D embeddings.")
+                    st.metric("Avg FAISS Index Search Time", f"{avg_search:.2f} ms", help="Time taken by FAISS index search.")
 
 # ----------------- TAB 3: T-SNE EMBEDDINGS -----------------
 with tab_embeddings:
@@ -626,36 +694,36 @@ with tab_embeddings:
     col_tsne_before, col_tsne_after = st.columns(2)
     
     with col_tsne_before:
-        st.markdown("##### ❌ Before Contrastive Training (Baseline 512D)")
-        before_tsne_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_before.png")
+        st.markdown(f"##### ❌ Before Contrastive Training (Baseline {res['feature_dim']}D)")
+        before_tsne_path = os.path.join(paths["OUTPUT_DIR"], "embeddings_tsne_before.png")
         if os.path.exists(before_tsne_path):
             st.image(before_tsne_path, use_container_width=True)
             st.markdown("<p style='font-size:0.85rem; color:#94A3B8; text-align:center;'>Modalities are completely separated. PAN and MUL representations of the same class do not align in the shared space.</p>", unsafe_allow_html=True)
         else:
-            st.info("Missing 'embeddings_tsne_before.png' image.")
+            st.info("Missing 'embeddings_tsne_before.png' image for this experiment.")
             
     with col_tsne_after:
         st.markdown("##### ✅ After Supervised Contrastive Training (Aligned 128D)")
-        after_tsne_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_after.png")
+        after_tsne_path = os.path.join(paths["OUTPUT_DIR"], "embeddings_tsne_after.png")
         if os.path.exists(after_tsne_path):
             st.image(after_tsne_path, use_container_width=True)
             st.markdown("<p style='font-size:0.85rem; color:#94A3B8; text-align:center;'>PAN and MUL representations of the same classes merge and overlap, showing successful cross-modal alignment.</p>", unsafe_allow_html=True)
         else:
-            st.info("Missing 'embeddings_tsne_after.png' image.")
+            st.info("Missing 'embeddings_tsne_after.png' image for this experiment.")
 
 # ----------------- TAB 4: ARCHITECTURE DIAGRAM -----------------
 with tab_arch:
     st.subheader("Dual-Encoder Embedding Alignment Architecture")
-    st.markdown("Below is the flow of Panchromatic (PAN) and Multispectral (MUL) modalities through their frozen ResNet18 backbones and trainable projection heads into the aligned 128D embedding space.")
+    st.markdown(f"Below is the flow of Panchromatic (PAN) and Multispectral (MUL) modalities through their frozen {res['backbone_name'].upper()} backbones and trainable projection heads into the aligned 128D embedding space.")
     
-    st.graphviz_chart('''
-    digraph G {
+    st.graphviz_chart(f'''
+    digraph G {{
         rankdir=LR;
         node [style=filled, fillcolor="#1E293B", color="#38BDF8", fontcolor="#F8FAFC", fontname="Arial", shape=box, penwidth=1.5];
         edge [color="#38BDF8", fontname="Arial", fontcolor="#94A3B8", penwidth=1.5];
         bgcolor="transparent";
         
-        subgraph cluster_pan {
+        subgraph cluster_pan {{
             label = "Panchromatic (PAN) Stream";
             fontname="Arial";
             color = "#3B82F6";
@@ -663,13 +731,13 @@ with tab_arch:
             fontcolor = "#3B82F6";
             
             PAN [label="PAN Image\\n(1 x 256 x 256)", fillcolor="#0F172A"];
-            PAN_Enc [label="ResNet18 backbone\\n(fc layer replaced with Identity)\\n(Frozen)", shape=ellipse];
-            PAN_Proj [label="Projection Head\\nLinear(512, 256) -> ReLU -> Linear(256, 128)\\n(Trainable)"];
+            PAN_Enc [label="{res['backbone_name'].upper()} backbone\\n(fc layer replaced with Identity)\\n(Frozen)", shape=ellipse];
+            PAN_Proj [label="Projection Head\\nLinear({res['feature_dim']}, 256) -> ReLU -> Linear(256, 128)\\n(Trainable)"];
             
             PAN -> PAN_Enc -> PAN_Proj;
-        }
+        }}
         
-        subgraph cluster_mul {
+        subgraph cluster_mul {{
             label = "Multispectral (MUL) Stream";
             fontname="Arial";
             color = "#10B981";
@@ -677,24 +745,23 @@ with tab_arch:
             fontcolor = "#10B981";
             
             MUL [label="MUL RGB Image\\n(3 x 64 x 64)", fillcolor="#0F172A"];
-            MUL_Enc [label="ResNet18 backbone\\n(fc layer replaced with Identity)\\n(Frozen)", shape=ellipse];
-            MUL_Proj [label="Projection Head\\nLinear(512, 256) -> ReLU -> Linear(256, 128)\\n(Trainable)"];
+            MUL_Enc [label="{res['backbone_name'].upper()} backbone\\n(fc layer replaced with Identity)\\n(Frozen)", shape=ellipse];
+            MUL_Proj [label="Projection Head\\nLinear({res['feature_dim']}, 256) -> ReLU -> Linear(256, 128)\\n(Trainable)"];
             
             MUL -> MUL_Enc -> MUL_Proj;
-        }
+        }}
         
         Shared [label="Shared 128D Space\\n(L2 Normalized Vectors)", shape=hexagon, fillcolor="#3F2B3E", color="#EC4899", fontcolor="#F472B6"];
         
-        PAN_Proj -> Shared [label="Cosine Similarity\\n(FAISS FlatIP Search)", constraint=true];
-        MUL_Proj -> Shared [label="Cosine Similarity\\n(FAISS FlatIP Search)", constraint=true];
-    }
+        PAN_Proj -> Shared [label="Cosine Similarity\\n(FAISS Search)", constraint=true];
+        MUL_Proj -> Shared [label="Cosine Similarity\\n(FAISS Search)", constraint=true];
+    }}
     ''')
 
 # ----------------- TAB 5: ABOUT PROJECT -----------------
 with tab_about:
     st.subheader("Project Information & Hackathon Details")
     
-    # Dataset Statistics Card
     st.markdown("""
     <div class="metric-card">
         <h4 style="margin-top:0px; color:#4285F4;">📊 Dataset Card: DSRSID</h4>
@@ -734,5 +801,5 @@ with tab_about:
     Instead of pair-only contrastive learning (which only aligns `PAN[i]` with `MUL[i]`), **Supervised Contrastive Learning** leverages the class labels. It forces all PAN and MUL embeddings that share the same class label (e.g., all Forests) to map close to each other in the shared 128D space, while pushing different categories apart.
     
     #### 3. FAISS Indexing (Inner Product)
-    **FAISS (Facebook AI Similarity Search)** is utilized for fast similarity search. By normalizing the 128D embeddings to unit length and using `faiss.IndexFlatIP` (Inner Product), similarity searches perform **Cosine Similarity calculations** on CPU in less than a millisecond, making it perfect for real-time remote sensing operations.
+    **FAISS (Facebook AI Similarity Search)** is utilized for fast similarity search. By normalizing the 128D embeddings to unit length and using dynamic index choices (FlatIP/HNSW/IVF PQ), similarity searches perform **Cosine Similarity calculations** on CPU in less than a millisecond, making it perfect for real-time remote sensing operations.
     """)

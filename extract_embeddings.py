@@ -2,18 +2,78 @@ import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torchvision.models import resnet18, ResNet18_Weights
 import numpy as np
 from tqdm import tqdm
 
 from dataset import DSRSIDDataset
-from config import DATASET_PATH, EMBEDDING_DIR, BATCH_SIZE, USE_FULL_DATASET, save_versioned_file
+from config import (
+    DATASET_PATH,
+    EMBEDDING_DIR,
+    BATCH_SIZE,
+    USE_FULL_DATASET,
+    BACKBONE,
+    IS_COLAB,
+    save_versioned_file,
+    check_stage_skip,
+    save_stage_state
+)
+
+# Define get_backbone_model here to avoid import dependencies during Phase 1
+def get_backbone_model(backbone_name):
+    import torchvision.models as models
+    backbone_name = backbone_name.lower()
+    if backbone_name == "resnet18":
+        try:
+            backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        except AttributeError:
+            backbone = models.resnet18(pretrained=True)
+        feature_dim = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+    elif backbone_name == "resnet50":
+        try:
+            backbone = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+        except AttributeError:
+            backbone = models.resnet50(pretrained=True)
+        feature_dim = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+    else:
+        raise ValueError(f"Unsupported backbone: {backbone_name}. Only resnet18 and resnet50 are supported.")
+    return backbone, feature_dim
+
+def run_extraction(dataloader, model, device, feature_dim):
+    pan_embeddings_list = []
+    mul_embeddings_list = []
+    labels_list = []
+
+    with torch.no_grad():
+        for pan_batch, mul_batch, label_batch in tqdm(dataloader, desc="Extracting features"):
+            # Move inputs to device with non_blocking=True for async transfer
+            pan_batch = pan_batch.to(device, non_blocking=True)
+            mul_batch = mul_batch.to(device, non_blocking=True)
+
+            # Extract features (using mixed precision autocast if GPU available)
+            use_amp = (device.type == 'cuda')
+            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+                pan_feats = model(pan_batch)
+                mul_feats = model(mul_batch)
+
+            # Store features as numpy arrays
+            pan_embeddings_list.append(pan_feats.cpu().numpy())
+            mul_embeddings_list.append(mul_feats.cpu().numpy())
+            labels_list.append(label_batch.numpy())
+
+    return (
+        np.concatenate(pan_embeddings_list, axis=0),
+        np.concatenate(mul_embeddings_list, axis=0),
+        np.concatenate(labels_list, axis=0)
+    )
 
 def main():
+    # CPU Safeguard
+    from config import check_safeguard, verify_cache
+    check_safeguard()
+
     # 1. Compute and save stratified indices for reproducibility
-    # Dataset has 8 classes, each has exactly 10,000 contiguous samples.
-    # We sample the first 625 images from each class (8 * 625 = 5000 samples total).
-    # If USE_FULL_DATASET is True, we sample all 10000 images from each class (80000 samples total).
     print("Computing stratified subset indices...")
     subset_indices = []
     num_classes = 8
@@ -26,11 +86,36 @@ def main():
         
     subset_indices = np.array(subset_indices, dtype=np.int32)
     indices_path = os.path.join(EMBEDDING_DIR, "subset_indices.npy")
+    
+    # 2. Skip check
+    # Check embedding dimension beforehand
+    _, test_feature_dim = get_backbone_model(BACKBONE)
+    
+    pan_embeddings_path = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
+    mul_embeddings_path = os.path.join(EMBEDDING_DIR, "mul_embeddings.npy")
+    labels_path = os.path.join(EMBEDDING_DIR, "labels.npy")
+    
+    expected_outputs = [indices_path, pan_embeddings_path, mul_embeddings_path, labels_path]
+    extra_config = {
+        "use_full_dataset": USE_FULL_DATASET,
+        "embedding_dim": test_feature_dim
+    }
+    
+    print("Checking Baseline Embeddings...")
+    is_cached, reason = verify_cache("baseline_embeddings")
+    if is_cached:
+        print("✔ Compatible cache found.\n")
+        return
+    else:
+        if reason:
+            print(f"⚠ Cache invalid. Reason: {reason}")
+        print("Extracting baseline embeddings...")
+
     np.save(indices_path, subset_indices)
     save_versioned_file(indices_path)
     print(f"Stratified indices saved to '{indices_path}' (Total: {len(subset_indices)}).")
 
-    # 2. Instantiate custom dataset and dataloader
+    # 3. Instantiate custom dataset
     dataset_path = DATASET_PATH
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Dataset file not found at: {dataset_path}")
@@ -38,61 +123,51 @@ def main():
     print(f"Loading dataset from: {dataset_path}...")
     dataset = DSRSIDDataset(file_path=dataset_path, indices=subset_indices)
     
-    # Using dynamic BATCH_SIZE; num_workers=0 is safe for h5py on Windows to avoid process-pickling issues
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-
-    # 3. Load pretrained ResNet18 model
-    print("Initializing pretrained ResNet18 model...")
-    try:
-        model = resnet18(weights=ResNet18_Weights.DEFAULT)
-    except Exception:
-        print("Warning: Failed to load ResNet18 with ResNet18_Weights, falling back to older pretrained=True API.")
-        model = resnet18(pretrained=True)
-
-    # Remove the classification layer by replacing it with Identity
-    # This turns the model into a 512-dimensional feature extractor
-    model.fc = nn.Identity()
-    
-    # Put model in evaluation mode
+    # 4. Load pretrained backbone model
+    print(f"Initializing pretrained {BACKBONE} model...")
+    model, feature_dim = get_backbone_model(BACKBONE)
     model.eval()
 
-    # Move to GPU if available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     print(f"Running inference on device: {device}")
 
-    # 4. Extract embeddings for both modalities
-    pan_embeddings_list = []
-    mul_embeddings_list = []
-    labels_list = []
+    # 5. Extract embeddings with Automatic Batch Size Scaling
+    current_batch_size = BATCH_SIZE
+    success = False
+    
+    while current_batch_size >= 64:
+        print(f"Running extraction with batch_size={current_batch_size}...")
+        
+        # Setup data loader optimized for device type
+        # pin_memory, num_workers, and persistent_workers are set for high GPU utilization
+        num_workers = 2 if (IS_COLAB and device.type == 'cuda') else 0
+        dataloader = DataLoader(
+            dataset,
+            batch_size=current_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=(device.type == 'cuda'),
+            persistent_workers=(num_workers > 0)
+        )
+        
+        try:
+            pan_embeddings, mul_embeddings, labels = run_extraction(dataloader, model, device, feature_dim)
+            success = True
+            break
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower() and device.type == 'cuda':
+                print(f"\nCUDA Out Of Memory caught with batch size {current_batch_size}. Retrying with batch size {current_batch_size // 2}...")
+                torch.cuda.empty_cache()
+                current_batch_size = current_batch_size // 2
+            else:
+                # Re-raise if it's not a CUDA OOM
+                raise e
 
-    print("Extracting features from PAN and MUL modalities...")
-    with torch.no_grad():
-        for pan_batch, mul_batch, label_batch in tqdm(dataloader, desc="Batches"):
-            # Move inputs to device
-            pan_batch = pan_batch.to(device)
-            mul_batch = mul_batch.to(device)
+    if not success:
+        raise RuntimeError("Embedding extraction failed: CUDA Out Of Memory even at minimum batch size (64).")
 
-            # Generate 512-dimensional features
-            # ResNet18 expects 3-channel normalized input of shape (batch, 3, 224, 224)
-            pan_feats = model(pan_batch)
-            mul_feats = model(mul_batch)
-
-            # Store features as numpy arrays
-            pan_embeddings_list.append(pan_feats.cpu().numpy())
-            mul_embeddings_list.append(mul_feats.cpu().numpy())
-            labels_list.append(label_batch.numpy())
-
-    # Concatenate features along the batch dimension
-    pan_embeddings = np.concatenate(pan_embeddings_list, axis=0)
-    mul_embeddings = np.concatenate(mul_embeddings_list, axis=0)
-    labels = np.concatenate(labels_list, axis=0)
-
-    # 5. Save the embeddings and class labels
-    pan_embeddings_path = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
-    mul_embeddings_path = os.path.join(EMBEDDING_DIR, "mul_embeddings.npy")
-    labels_path = os.path.join(EMBEDDING_DIR, "labels.npy")
-
+    # 6. Save the embeddings and class labels
     np.save(pan_embeddings_path, pan_embeddings)
     np.save(mul_embeddings_path, mul_embeddings)
     np.save(labels_path, labels)
@@ -106,8 +181,12 @@ def main():
     print(f"Saved '{mul_embeddings_path}' of shape: {mul_embeddings.shape}")
     print(f"Saved '{labels_path}' of shape: {labels.shape}")
 
-    # TODO: Experiment with all 4 spectral channels during advanced training phase
-    # (Currently, only the first 3 channels are used as RGB input for feature extraction and visualization).
+    # Save experiment metadata
+    from config import save_experiment_metadata
+    save_experiment_metadata()
+
+    # 7. Record stage completion state
+    save_stage_state("extract_embeddings", expected_outputs, extra_config)
 
 if __name__ == "__main__":
     main()

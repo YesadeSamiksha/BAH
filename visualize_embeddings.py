@@ -2,19 +2,18 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
-from config import EMBEDDING_DIR, OUTPUT_DIR, save_versioned_file
+from config import (
+    EMBEDDING_DIR,
+    OUTPUT_DIR,
+    BACKBONE,
+    save_versioned_file,
+    verify_cache,
+    update_pipeline_manifest
+)
 
 def generate_tsne_plot(pan_embs, mul_embs, labels, title, output_path, samples_per_class=100):
     """
-    Fits t-SNE on combined PAN and MUL embeddings and generates a professional scatter plot.
-    
-    Args:
-        pan_embs (np.ndarray): PAN embeddings (N, D).
-        mul_embs (np.ndarray): MUL embeddings (N, D).
-        labels (np.ndarray): Array of labels corresponding to embeddings (N,).
-        title (str): Plot title.
-        output_path (str): Filepath to save the plot image.
-        samples_per_class (int): Number of samples per class to draw for visualization.
+    Fits t-SNE on combined PAN and MUL embeddings and generates a scatter plot.
     """
     print(f"Selecting {samples_per_class} samples per class for t-SNE...")
     sampled_indices = []
@@ -30,7 +29,6 @@ def generate_tsne_plot(pan_embs, mul_embs, labels, title, output_path, samples_p
     labels_sampled = labels[sampled_indices]
     
     # Combine PAN and MUL to project them into the same 2D t-SNE space
-    # Total samples = 2 * 8 * samples_per_class (e.g. 1600 points)
     combined_embs = np.concatenate([pan_sampled, mul_sampled], axis=0)
     
     print("Fitting t-SNE (this might take a few seconds on CPU)...")
@@ -47,7 +45,7 @@ def generate_tsne_plot(pan_embs, mul_embs, labels, title, output_path, samples_p
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica']
     
-    # Class colors (8 distinct colors from qualitative map)
+    # Class colors
     colors = plt.cm.tab10(np.linspace(0, 1, 10))[:8]
     class_names = [
         "Class 1 (Label 1.0)",
@@ -60,27 +58,26 @@ def generate_tsne_plot(pan_embs, mul_embs, labels, title, output_path, samples_p
         "Class 8 (Label 8.0)",
     ]
     
-    # Plot classes individually to compile class legends
+    # Plot classes individually
     for c in range(8):
         class_label = float(c + 1.0)
         idx_match = np.where(labels_sampled == class_label)[0]
         
-        # Plot PAN (circle marker 'o', filled)
+        # Plot PAN (circle)
         plt.scatter(
             pan_2d[idx_match, 0], pan_2d[idx_match, 1],
             color=colors[c], marker='o', s=30, alpha=0.8,
-            label=class_names[c] if c == 0 else "" # Class colors are covered by a single class legend
+            label=class_names[c] if c == 0 else ""
         )
         
-        # Plot MUL (triangle-up marker '^', hollow/filled)
+        # Plot MUL (triangle)
         plt.scatter(
             mul_2d[idx_match, 0], mul_2d[idx_match, 1],
             color=colors[c], marker='^', s=45, alpha=0.8,
             edgecolors='black', linewidths=0.5
         )
         
-    # Create two separate legends: one for class colors, one for markers (modalities)
-    # 1. Modality markers legend
+    # Legends
     from matplotlib.lines import Line2D
     legend_elements = [
         Line2D([0], [0], marker='o', color='gray', linestyle='None', markersize=8, label='PAN Modality'),
@@ -89,7 +86,6 @@ def generate_tsne_plot(pan_embs, mul_embs, labels, title, output_path, samples_p
     modality_legend = plt.legend(handles=legend_elements, loc='upper left', framealpha=0.9, title="Modalities")
     plt.gca().add_artist(modality_legend)
     
-    # 2. Class colors legend
     color_elements = [
         Line2D([0], [0], marker='s', color='white', markerfacecolor=colors[c], markersize=10, label=class_names[c])
         for c in range(8)
@@ -113,19 +109,35 @@ def main():
         raise FileNotFoundError(f"Labels file '{labels_file}' not found. Please run baseline extraction first.")
     labels = np.load(labels_file)
 
-    # 2. Generate Before Training Plot (Baseline 512D)
+    before_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_before.png")
+    after_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_after.png")
+    expected_outputs = [before_path, after_path]
+    
+    # Skip check
+    print("Checking Embedding Visualizations...")
+    is_cached, reason = verify_cache("visualizations_complete")
+    if is_cached:
+        print("✔ Compatible cache found.\n")
+        return
+    else:
+        if reason:
+            print(f"⚠ Cache invalid. Reason: {reason}")
+        print("Generating embedding visualizations...")
+
+    # 2. Generate Before Training Plot (Baseline)
     print("\n--- Processing Baseline (Before Training) Embeddings ---")
     pan_before_file = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
     mul_before_file = os.path.join(EMBEDDING_DIR, "mul_embeddings.npy")
     
     if os.path.exists(pan_before_file) and os.path.exists(mul_before_file):
-        pan_before = np.load(pan_before_file)
-        mul_before = np.load(mul_before_file)
+        pan_before = np.load(pan_before_file, mmap_mode='r')
+        mul_before = np.load(mul_before_file, mmap_mode='r')
         
-        before_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_before.png")
+        feature_dim = pan_before.shape[1]
+        
         generate_tsne_plot(
             pan_before, mul_before, labels,
-            title="t-SNE Embeddings Space Before Training (Baseline 512D)",
+            title=f"t-SNE Embeddings Space Before Training (Baseline {BACKBONE} {feature_dim}D)",
             output_path=before_path
         )
         save_versioned_file(before_path)
@@ -138,18 +150,20 @@ def main():
     mul_after_file = os.path.join(EMBEDDING_DIR, "mul_embeddings_contrastive.npy")
     
     if os.path.exists(pan_after_file) and os.path.exists(mul_after_file):
-        pan_after = np.load(pan_after_file)
-        mul_after = np.load(mul_after_file)
+        pan_after = np.load(pan_after_file, mmap_mode='r')
+        mul_after = np.load(mul_after_file, mmap_mode='r')
         
-        after_path = os.path.join(OUTPUT_DIR, "embeddings_tsne_after.png")
         generate_tsne_plot(
             pan_after, mul_after, labels,
-            title="t-SNE Embeddings Space After Supervised Contrastive Training (128D)",
+            title="t-SNE Embeddings Space After Supervised Contrastive Training (Aligned 128D)",
             output_path=after_path
         )
         save_versioned_file(after_path)
     else:
         print("Warning: Contrastive embeddings not found. Skipping 'after' plot.")
+
+    # 4. Save stage state
+    update_pipeline_manifest("visualizations_complete", True)
 
 if __name__ == "__main__":
     main()
