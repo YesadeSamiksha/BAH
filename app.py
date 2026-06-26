@@ -224,6 +224,19 @@ def load_resources(exp_name, retrieval_mode):
         
         best_model_path = os.path.join(model_dir, "best_model.pth")
         if os.path.exists(best_model_path):
+            try:
+                expected_dim = pan_embs.shape[1]
+                from config import verify_model_metadata
+                verify_model_metadata(
+                    best_model_path,
+                    expected_backbone=backbone_name,
+                    expected_feature_dimension=expected_dim,
+                    expected_dataset_hash=config.get_dataset_hash(),
+                    strict_hyperparams=False
+                )
+            except RuntimeError as e:
+                st.error(f"🛑 Model Incompatibility Detected:\n\n{str(e)}")
+                st.stop()
             model.load_state_dict(torch.load(best_model_path, map_location=torch.device('cpu')))
         model.eval()
     else:

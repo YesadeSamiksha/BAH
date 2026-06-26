@@ -48,7 +48,6 @@ if DATASET_PATH is None:
 
 print(f"Using dataset:\n\n{DATASET_PATH}")
 
-# Centralized Constants / Hyperparameters
 BACKBONE = "resnet50"  # Supported: "resnet18", "resnet50"
 FAISS_INDEX = "auto"   # Supported: "auto", "FlatL2", "FlatIP", "IVF Flat", "IVF PQ", "HNSW"
 VALIDATION_INTERVAL = 5
@@ -238,6 +237,7 @@ def get_pipeline_manifest():
     If it does not exist, initializes a new one.
     """
     import json
+    import time
     manifest_file = os.path.join(get_experiment_dir(), "pipeline_state.json")
     
     default_manifest = {
@@ -269,47 +269,82 @@ def get_pipeline_manifest():
     if not os.path.exists(manifest_file):
         return default_manifest
         
-    try:
-        with open(manifest_file, "r") as f:
-            manifest = json.load(f)
-        if "meta" not in manifest or "stages" not in manifest:
+    for attempt in range(3):
+        try:
+            with open(manifest_file, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            if "meta" not in manifest or "stages" not in manifest:
+                return default_manifest
+            return manifest
+        except (json.JSONDecodeError, PermissionError):
+            time.sleep(0.1)
+        except Exception:
             return default_manifest
-        return manifest
-    except Exception:
-        return default_manifest
+            
+    return default_manifest
 
 def save_pipeline_manifest(manifest):
     """
-    Saves pipeline_state.json.
+    Saves pipeline_state.json atomically using a temp file.
     """
     import json
-    manifest_file = os.path.join(get_experiment_dir(), "pipeline_state.json")
+    import tempfile
+    manifest_dir = get_experiment_dir()
+    os.makedirs(manifest_dir, exist_ok=True)
+    manifest_file = os.path.join(manifest_dir, "pipeline_state.json")
     manifest["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Write atomically
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=manifest_dir, suffix=".tmp")
     try:
-        with open(manifest_file, "w") as f:
+        with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
             json.dump(manifest, f, indent=4)
+        os.replace(tmp_path, manifest_file)
     except Exception as e:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
         print(f"Warning: Failed to save pipeline manifest: {e}")
 
 def verify_cache(stage_name):
     """
     Verifies if a stage is validly cached.
     Checks:
-      1. Stage status is true in manifest.
+      1. All required output files exist on disk.
       2. Metadata matches current configuration.
-      3. All output files exist on disk.
-    If invalid, repairs manifest and returns (False, reason).
+      3. Stage status is true in manifest.
+    If 1 and 2 pass but 3 fails, returns (True, "Manifest synchronization issue: outputs exist but manifest not updated").
+    If 1 or 2 fail, repairs manifest and returns (False, reason).
     """
     if stage_name == "dataset_ready":
         if os.path.exists(DATASET_PATH):
             return True, None
         return False, f"Dataset file missing at {DATASET_PATH}"
         
-    manifest = get_pipeline_manifest()
-    
-    if not manifest["stages"].get(stage_name, False):
-        return False, "Not marked completed in manifest"
+    # 1. First validate file existence
+    required_files = STAGE_OUTPUTS.get(stage_name, [])
+    files_to_check = list(required_files)
         
+    if stage_name == "training_complete":
+        checkpoint_found = False
+        if os.path.exists(CHECKPOINT_DIR):
+            for file_name in os.listdir(CHECKPOINT_DIR):
+                if file_name.startswith("checkpoint_epoch_") and file_name.endswith(".pth"):
+                    checkpoint_found = True
+                    break
+        if not checkpoint_found:
+            invalidate_stage_and_dependents("training_complete", "No checkpoint file found")
+            return False, "Missing checkpoint files"
+
+    for f in files_to_check:
+        if not os.path.exists(f):
+            invalidate_stage_and_dependents(stage_name, f"Missing output file: {os.path.basename(f)}")
+            return False, f"Missing output file: {os.path.basename(f)}"
+
+    # 2. Next validate metadata compatibility
+    manifest = get_pipeline_manifest()
     meta = manifest.get("meta", {})
     
     feature_dimension = get_backbone_feature_dim(BACKBONE)
@@ -351,25 +386,10 @@ def verify_cache(stage_name):
         if meta.get(k) != v:
             invalidate_stage_and_dependents(stage_name, f"Metadata mismatch on '{k}': expected {v}, got {meta.get(k)}")
             return False, f"Metadata mismatch on '{k}'"
-            
-    required_files = STAGE_OUTPUTS.get(stage_name, [])
-    files_to_check = list(required_files)
-        
-    if stage_name == "training_complete":
-        checkpoint_found = False
-        if os.path.exists(CHECKPOINT_DIR):
-            for file_name in os.listdir(CHECKPOINT_DIR):
-                if file_name.startswith("checkpoint_epoch_") and file_name.endswith(".pth"):
-                    checkpoint_found = True
-                    break
-        if not checkpoint_found:
-            invalidate_stage_and_dependents("training_complete", "No checkpoint file found")
-            return False, "Missing checkpoint files"
 
-    for f in files_to_check:
-        if not os.path.exists(f):
-            invalidate_stage_and_dependents(stage_name, f"Missing output file: {os.path.basename(f)}")
-            return False, f"Missing output file: {os.path.basename(f)}"
+    # 3. Check manifest status
+    if not manifest["stages"].get(stage_name, False):
+        return True, "Manifest synchronization issue: outputs exist but manifest not updated"
             
     return True, None
 
@@ -436,6 +456,135 @@ def update_pipeline_manifest(stage_name, status=True):
         "experiment_version": "v1"
     }
     save_pipeline_manifest(manifest)
+
+def save_model_metadata(model_path):
+    """
+    Saves a companion metadata file for the saved model checkpoint.
+    """
+    import json
+    import numpy as np
+    
+    metadata_path = os.path.splitext(model_path)[0] + "_metadata.json"
+    
+    dataset_size = 5000
+    try:
+        labels_path = os.path.join(EMBEDDING_DIR, "labels.npy")
+        if os.path.exists(labels_path):
+            labels = np.load(labels_path, mmap_mode='r')
+            dataset_size = int(labels.shape[0])
+    except Exception:
+        pass
+        
+    feature_dimension = get_backbone_feature_dim(BACKBONE)
+    try:
+        pan_path = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
+        if os.path.exists(pan_path):
+            pan_embs = np.load(pan_path, mmap_mode='r')
+            feature_dimension = int(pan_embs.shape[1])
+    except Exception:
+        pass
+
+    metadata = {
+        "backbone": BACKBONE,
+        "feature_dimension": feature_dimension,
+        "projection_dimension": 128,
+        "faiss_index": FAISS_INDEX,
+        "freeze_backbone": FREEZE_BACKBONE,
+        "dataset_hash": get_dataset_hash(),
+        "preprocessing_version": "v1",
+        "experiment_version": "v1",
+        "training_date": datetime.datetime.now().strftime("%Y-%m-%d"),
+        "epochs": EPOCHS,
+        "learning_rate": LEARNING_RATE
+    }
+    
+    try:
+        # Write atomically
+        import tempfile
+        metadata_dir = os.path.dirname(model_path)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=metadata_dir, suffix=".tmp")
+        with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=4)
+        os.replace(tmp_path, metadata_path)
+        print(f"Saved model companion metadata to '{metadata_path}'.")
+    except Exception as e:
+        print(f"Warning: Failed to save model metadata: {e}")
+
+def verify_model_metadata(model_path, expected_backbone=None, expected_feature_dimension=None, expected_dataset_hash=None, strict_hyperparams=False):
+    """
+    Loads the model companion metadata and verifies compatibility with current configuration.
+    If expected_* parameters are None, falls back to the current configuration constants.
+    If incompatible, raises a RuntimeError.
+    """
+    import json
+    import numpy as np
+    
+    metadata_path = os.path.splitext(model_path)[0] + "_metadata.json"
+    if not os.path.exists(metadata_path):
+        print(f"Warning: Model companion metadata file not found at '{metadata_path}'. Skipping validation.")
+        return True
+        
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read model metadata file at '{metadata_path}': {e}")
+        
+    # Set default expected values if not provided
+    if expected_backbone is None:
+        expected_backbone = BACKBONE
+        
+    if expected_feature_dimension is None:
+        expected_feature_dimension = get_backbone_feature_dim(expected_backbone)
+        # Try to read feature dimension from saved embeddings if available
+        try:
+            pan_emb_file = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
+            if os.path.exists(pan_emb_file):
+                pan_embs = np.load(pan_emb_file, mmap_mode='r')
+                expected_feature_dimension = int(pan_embs.shape[1])
+        except Exception:
+            pass
+            
+    if expected_dataset_hash is None:
+        expected_dataset_hash = get_dataset_hash()
+
+    # Fields to verify
+    critical_checks = {
+        "backbone": expected_backbone,
+        "feature_dimension": expected_feature_dimension,
+        "dataset_hash": expected_dataset_hash
+    }
+    
+    strict_checks = {
+        "projection_dimension": 128,
+        "faiss_index": FAISS_INDEX,
+        "freeze_backbone": FREEZE_BACKBONE,
+        "preprocessing_version": "v1",
+        "experiment_version": "v1"
+    }
+    
+    checks_to_run = dict(critical_checks)
+    if strict_hyperparams:
+        checks_to_run.update(strict_checks)
+        
+    mismatches = []
+    for key, expected_val in checks_to_run.items():
+        actual_val = metadata.get(key)
+        if actual_val != expected_val:
+            mismatches.append(f"  - {key}: expected {expected_val}, got {actual_val}")
+            
+    if mismatches:
+        mismatch_str = "\n".join(mismatches)
+        error_msg = (
+            f"🛑 CONFIGURATION MISMATCH DETECTED!\n"
+            f"Model file: {os.path.basename(model_path)}\n"
+            f"The following parameters differ from the model's metadata:\n{mismatch_str}\n"
+            f"Please ensure your parameters are correct or train a new model."
+        )
+        raise RuntimeError(error_msg)
+        
+    print(f"✔ Model companion metadata validation passed for '{model_path}'.")
+    return True
 
 def check_stage_skip(stage_name, extra_config=None):
     stage_map = {

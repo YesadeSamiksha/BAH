@@ -131,6 +131,14 @@ def main():
         
         # Instantiate and load contrastive model
         print("Loading contrastive model...")
+        from config import verify_model_metadata
+        try:
+            verify_model_metadata(best_model_path, strict_hyperparams=False)
+        except RuntimeError as e:
+            print(str(e))
+            import sys
+            sys.exit(1)
+            
         model = ContrastiveModel(freeze_backbone=FREEZE_BACKBONE)
         model.load_state_dict(torch.load(best_model_path, map_location=device))
         model.eval()

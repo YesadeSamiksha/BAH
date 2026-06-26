@@ -3,6 +3,18 @@ import sys
 import argparse
 import subprocess
 
+# Ensure UTF-8 output encoding for terminals
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 # Add current directory to path just in case
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -49,6 +61,8 @@ def get_stage_status_and_reason(stage_name):
         
     is_cached, reason = verify_cache(stage_name)
     if is_cached:
+        if reason and "Manifest synchronization issue" in reason:
+            return "⚠ Sync Issue", reason
         return "✔ Cached", "All output files verified"
     else:
         return "⚠ Cache Invalid", reason or "Output files missing or configuration mismatch"
@@ -92,6 +106,9 @@ def run_stage_with_dependencies(stage_name, visited=None):
     # 2. Run the stage if not cached
     is_cached, reason = verify_cache(stage_name)
     if is_cached:
+        if reason and "Manifest synchronization issue" in reason:
+            print(f"ℹ Synchronizing manifest for stage '{stage_name}' (outputs exist and are valid).")
+            update_pipeline_manifest(stage_name, True)
         print(f"✔ Stage '{stage_name}' is already cached. Skipping.")
         return
         
@@ -126,6 +143,10 @@ def run_stage_with_dependencies(stage_name, visited=None):
         print(f"❌ Error: Stage '{stage_name}' execution finished but cache verification failed! Reason: {reason}")
         sys.exit(1)
     else:
+        # If it was verified but was a sync issue, heal it now.
+        if reason and "Manifest synchronization issue" in reason:
+            print(f"ℹ Synchronizing manifest for stage '{stage_name}' (outputs exist and are valid).")
+            update_pipeline_manifest(stage_name, True)
         print(f"✔ Stage '{stage_name}' verified successfully.\n")
 
 def main():

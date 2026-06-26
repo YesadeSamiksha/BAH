@@ -13,7 +13,8 @@ from config import (
     RETRIEVAL_MODE,
     save_versioned_file,
     verify_cache,
-    update_pipeline_manifest
+    update_pipeline_manifest,
+    MODEL_DIR
 )
 
 def retrieve(query_embedding, faiss_index, top_k=5, exclude_index=None):
@@ -147,6 +148,15 @@ def main():
         mul_embeddings_file = os.path.join(EMBEDDING_DIR, "mul_embeddings.npy")
     elif RETRIEVAL_MODE == "contrastive":
         print("Running retrieval in CONTRASTIVE mode...")
+        best_model_path = os.path.join(MODEL_DIR, "best_model.pth")
+        from config import verify_model_metadata
+        try:
+            verify_model_metadata(best_model_path, strict_hyperparams=False)
+        except RuntimeError as e:
+            print(str(e))
+            import sys
+            sys.exit(1)
+            
         pan_index_file = os.path.join(FAISS_DIR, "pan_index_contrastive.bin")
         mul_index_file = os.path.join(FAISS_DIR, "mul_index_contrastive.bin")
         pan_embeddings_file = os.path.join(EMBEDDING_DIR, "pan_embeddings_contrastive.npy")

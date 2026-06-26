@@ -34,7 +34,9 @@ from config import (
     save_timestamped_file,
     check_safeguard,
     verify_cache,
-    update_pipeline_manifest
+    update_pipeline_manifest,
+    save_model_metadata,
+    verify_model_metadata
 )
 
 LR = LEARNING_RATE
@@ -392,6 +394,14 @@ def main():
                 checkpoint_path = os.path.join(CHECKPOINT_DIR, f"checkpoint_epoch_{latest_epoch}.pth")
                 print(f"\nResuming from checkpoint: {checkpoint_path}")
                 
+                # Check companion metadata and stop execution on failure
+                try:
+                    verify_model_metadata(checkpoint_path, strict_hyperparams=True)
+                except RuntimeError as e:
+                    print(str(e))
+                    import sys
+                    sys.exit(1)
+                
                 checkpoint = torch.load(checkpoint_path, map_location=device)
                 model.load_state_dict(checkpoint['model_state_dict'])
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -404,6 +414,7 @@ def main():
                 patience_counter = checkpoint.get('patience_counter', 0)
                 start_epoch = latest_epoch + 1
             except Exception as e:
+                # If we exited due to mismatch, sys.exit was called. Other errors go here.
                 print(f"Warning: Failed to load checkpoint. Starting from scratch. Error: {e}")
 
     # Generate Initial Epoch 0 visualization (only on start)
@@ -573,6 +584,7 @@ def main():
         }
         checkpoint_path = os.path.join(CHECKPOINT_DIR, f"checkpoint_epoch_{epoch}.pth")
         torch.save(checkpoint, checkpoint_path)
+        save_model_metadata(checkpoint_path)
 
         # Early stopping and best model saving (only run on validation epochs)
         if val_loss is not None:
@@ -583,6 +595,7 @@ def main():
                 torch.save(model.state_dict(), best_model_path)
                 save_versioned_file(best_model_path)
                 save_timestamped_file(best_model_path)
+                save_model_metadata(best_model_path)
                 print(f"  Saved best model checkpoint to '{best_model_path}'")
                 patience_counter = 0
             else:
