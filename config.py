@@ -4,23 +4,21 @@ import shutil
 import datetime
 
 # Detect if running on Google Colab
-IS_COLAB = 'google.colab' in sys.modules or 'google.colab' in os.environ
-if not IS_COLAB:
-    try:
-        import google.colab
-        IS_COLAB = True
-    except ImportError:
-        IS_COLAB = False
+IS_COLAB = False
+try:
+    import google.colab
+    IS_COLAB = True
+except ImportError:
+    pass
 
 # Setup Roots
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if IS_COLAB:
-    STORAGE_ROOT = "/content/drive/MyDrive/ISRO_Hackathon"
+    STORAGE_ROOT = "/content/drive/MyDrive/BAH"
 else:
     STORAGE_ROOT = PROJECT_ROOT
 
 # Centralized Directories
-DATASET_PATH = os.path.join(STORAGE_ROOT, "data", "DSRSID.mat")
 MODEL_DIR = os.path.join(STORAGE_ROOT, "models")
 CHECKPOINT_DIR = os.path.join(STORAGE_ROOT, "checkpoints")
 EMBEDDING_DIR = os.path.join(STORAGE_ROOT, "embeddings")
@@ -29,8 +27,36 @@ LOG_DIR = os.path.join(STORAGE_ROOT, "logs")
 OUTPUT_DIR = os.path.join(STORAGE_ROOT, "outputs")
 
 # Automatically create missing directories
-for directory in [os.path.dirname(DATASET_PATH), MODEL_DIR, CHECKPOINT_DIR, EMBEDDING_DIR, FAISS_DIR, LOG_DIR, OUTPUT_DIR]:
+for directory in [
+    MODEL_DIR,
+    CHECKPOINT_DIR,
+    EMBEDDING_DIR,
+    FAISS_DIR,
+    LOG_DIR,
+    OUTPUT_DIR
+]:
     os.makedirs(directory, exist_ok=True)
+
+# Automatic Dataset Discovery
+possible_paths = [
+    os.path.join(STORAGE_ROOT, "data", "DSRSID.mat"),
+    os.path.join(STORAGE_ROOT, "dataset", "DSRSID.mat")
+]
+
+DATASET_PATH = None
+for path in possible_paths:
+    if os.path.exists(path):
+        DATASET_PATH = path
+        break
+
+if DATASET_PATH is None:
+    checked_paths_str = "\n".join(possible_paths)
+    raise FileNotFoundError(
+        f"Dataset not found.\n\nChecked:\n\n{checked_paths_str}\n\n"
+        f"Please place DSRSID.mat into one of these directories."
+    )
+
+print(f"Using dataset:\n\n{DATASET_PATH}")
 
 # Centralized Constants / Hyperparameters
 FREEZE_BACKBONE = True
