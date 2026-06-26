@@ -64,6 +64,33 @@ USE_FULL_DATASET = False
 
 FORCE_LOCAL_FULL_TRAIN = False
 
+def get_backbone_feature_dim(backbone_name):
+    """
+    Dynamically returns the feature dimension of the selected backbone.
+    Uses a fast-path for standard backbones to avoid importing PyTorch/torchvision
+    in pure-NumPy/Sklearn scripts, preventing Windows DLL load conflicts (WinError 1114).
+    """
+    backbone_name = backbone_name.lower()
+    if backbone_name == "resnet18":
+        return 512
+    elif backbone_name == "resnet50":
+        return 2048
+        
+    # Dynamic lookup fallback for other/future backbones
+    try:
+        import torchvision.models as models
+        if hasattr(models, backbone_name):
+            model = getattr(models, backbone_name)()
+            if hasattr(model, "fc"):
+                return model.fc.in_features
+            elif hasattr(model, "classifier"):
+                if hasattr(model.classifier, "in_features"):
+                    return model.classifier.in_features
+                return model.classifier[-1].in_features
+        raise ValueError(f"Unsupported backbone: {backbone_name}")
+    except Exception as e:
+        raise ValueError(f"Error resolving backbone '{backbone_name}': {e}")
+
 def check_safeguard():
     """
     Aborts training/extraction/evaluation if attempting to run the full dataset locally.
@@ -219,7 +246,7 @@ def get_pipeline_manifest():
             "dataset_size": 5000,
             "preprocessing_version": "v1",
             "backbone": BACKBONE,
-            "feature_dimension": 512 if BACKBONE == "resnet18" else 2048,
+            "feature_dimension": get_backbone_feature_dim(BACKBONE),
             "projection_dimension": 128,
             "faiss_index_type": FAISS_INDEX,
             "freeze_backbone": FREEZE_BACKBONE,
@@ -285,7 +312,7 @@ def verify_cache(stage_name):
         
     meta = manifest.get("meta", {})
     
-    feature_dimension = 512 if BACKBONE == "resnet18" else 2048
+    feature_dimension = get_backbone_feature_dim(BACKBONE)
     try:
         pan_emb_file = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
         if os.path.exists(pan_emb_file):
@@ -376,7 +403,7 @@ def update_pipeline_manifest(stage_name, status=True):
     manifest = get_pipeline_manifest()
     manifest["stages"][stage_name] = status
     
-    feature_dimension = 512 if BACKBONE == "resnet18" else 2048
+    feature_dimension = get_backbone_feature_dim(BACKBONE)
     try:
         pan_emb_file = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
         if os.path.exists(pan_emb_file):
@@ -537,7 +564,7 @@ def save_experiment_metadata(resolved_faiss_index=None):
     except Exception:
         pass
         
-    feature_dimension = 512 if BACKBONE == "resnet18" else 2048
+    feature_dimension = get_backbone_feature_dim(BACKBONE)
     try:
         pan_path = os.path.join(EMBEDDING_DIR, "pan_embeddings.npy")
         if os.path.exists(pan_path):

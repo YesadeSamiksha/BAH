@@ -327,7 +327,7 @@ if metadata:
     st.sidebar.markdown(f"""
     **Dataset**: `{metadata.get('dataset', 'DSRSID')}` ({metadata.get('dataset_size', 5000):,} samples)  
     **Backbone**: `{metadata.get('backbone', 'resnet18').upper()}`  
-    **Feature Dim**: `{metadata.get('feature_dimension', 512)}`  
+    **Feature Dim**: `{metadata.get('feature_dimension', config.get_backbone_feature_dim(metadata.get('backbone', 'resnet18')))}`  
     **Projection Dim**: `{metadata.get('projection_dimension', 128)}`  
     **Index Type**: `{metadata.get('faiss', 'HNSW')}`  
     **Freeze Backbone**: `{metadata.get('freeze_backbone', True)}`  

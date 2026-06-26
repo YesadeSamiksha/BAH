@@ -57,16 +57,19 @@ def run_extraction(dataloader, model, device, feature_dim):
                 pan_feats = model(pan_batch)
                 mul_feats = model(mul_batch)
 
+            if len(pan_embeddings_list) == 0:
+                print(f"Batch Output      : {pan_feats.shape}")
+
             # Store features as numpy arrays
             pan_embeddings_list.append(pan_feats.cpu().numpy())
             mul_embeddings_list.append(mul_feats.cpu().numpy())
             labels_list.append(label_batch.numpy())
 
-    return (
-        np.concatenate(pan_embeddings_list, axis=0),
-        np.concatenate(mul_embeddings_list, axis=0),
-        np.concatenate(labels_list, axis=0)
-    )
+    pan_embs = np.concatenate(pan_embeddings_list, axis=0)
+    mul_embs = np.concatenate(mul_embeddings_list, axis=0)
+    lbls = np.concatenate(labels_list, axis=0)
+    print(f"Saved Shape       : {pan_embs.shape}")
+    return pan_embs, mul_embs, lbls
 
 def main():
     # CPU Safeguard
@@ -128,6 +131,11 @@ def main():
     model, feature_dim = get_backbone_model(BACKBONE)
     model.eval()
 
+    # Diagnostic prints
+    print(f"Selected Backbone : {BACKBONE}")
+    print(f"Model Class       : {model.__class__.__module__}.{model.__class__.__name__}")
+    print(f"Feature Dimension : {feature_dim}")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     print(f"Running inference on device: {device}")
@@ -177,6 +185,8 @@ def main():
     save_versioned_file(labels_path)
 
     print("\nFeature extraction completed successfully!")
+    print(f"PAN Embeddings Shape : {pan_embeddings.shape}")
+    print(f"MUL Embeddings Shape : {mul_embeddings.shape}")
     print(f"Saved '{pan_embeddings_path}' of shape: {pan_embeddings.shape}")
     print(f"Saved '{mul_embeddings_path}' of shape: {mul_embeddings.shape}")
     print(f"Saved '{labels_path}' of shape: {labels.shape}")
