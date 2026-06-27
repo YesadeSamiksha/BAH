@@ -1,7 +1,20 @@
 import os
+import sys
 import csv
 import json
 import time
+
+# Ensure UTF-8 output encoding for terminals
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -661,35 +674,51 @@ def main():
     print(f"Training curves saved to: {curve_path}")
 
     # 7. ONNX Export
+    onnx_success = False
+    onnx_skipped_reason = None
     best_model_path = os.path.join(MODEL_DIR, "best_model.pth")
     onnx_path = os.path.join(MODEL_DIR, "best_model.onnx")
     if os.path.exists(best_model_path):
         print("\nExporting best model to ONNX...")
         try:
-            onnx_model = ContrastiveModel(freeze_backbone=False)
-            onnx_model.load_state_dict(torch.load(best_model_path, map_location='cpu'))
-            onnx_model.eval()
-            
-            dummy_pan = torch.randn(1, 3, 224, 224)
-            dummy_mul = torch.randn(1, 3, 224, 224)
-            
-            torch.onnx.export(
-                onnx_model,
-                (dummy_pan, dummy_mul),
-                onnx_path,
-                input_names=["pan_input", "mul_input"],
-                output_names=["pan_output", "mul_output"],
-                dynamic_axes={
-                    "pan_input": {0: "batch_size"},
-                    "mul_input": {0: "batch_size"},
-                    "pan_output": {0: "batch_size"},
-                    "mul_output": {0: "batch_size"}
-                },
-                opset_version=11
-            )
-            print(f"ONNX model successfully saved to '{onnx_path}'.")
-        except Exception as e:
-            print(f"Warning: ONNX export failed: {e}")
+            import onnx
+            import onnxscript
+            has_deps = True
+        except ImportError:
+            print("ONNX dependencies not installed.")
+            print("Skipping ONNX export.")
+            has_deps = False
+            onnx_skipped_reason = "dependencies not installed"
+
+        if has_deps:
+            try:
+                onnx_model = ContrastiveModel(freeze_backbone=False)
+                onnx_model.load_state_dict(torch.load(best_model_path, map_location='cpu'))
+                onnx_model.eval()
+                
+                dummy_pan = torch.randn(1, 3, 224, 224)
+                dummy_mul = torch.randn(1, 3, 224, 224)
+                
+                torch.onnx.export(
+                    onnx_model,
+                    (dummy_pan, dummy_mul),
+                    onnx_path,
+                    input_names=["pan_input", "mul_input"],
+                    output_names=["pan_output", "mul_output"],
+                    dynamic_axes={
+                        "pan_input": {0: "batch_size"},
+                        "mul_input": {0: "batch_size"},
+                        "pan_output": {0: "batch_size"},
+                        "mul_output": {0: "batch_size"}
+                    },
+                    opset_version=11
+                )
+                print(f"ONNX model successfully saved to '{onnx_path}'.")
+                onnx_success = True
+            except Exception as e:
+                print("ONNX export skipped:")
+                print(e)
+                onnx_skipped_reason = str(e)
 
     # 8. Save experiment metadata
     from config import save_experiment_metadata
@@ -699,6 +728,28 @@ def main():
     update_pipeline_manifest("training_complete", True)
 
     raw_dataset.close()
+
+    # Print success summary
+    print("\n========================================")
+    print("Training Summary")
+    print("========================================\n")
+    print("✔ Training Complete\n")
+    if os.path.exists(best_model_path):
+        print("✔ best_model.pth saved\n")
+    
+    metadata_path = os.path.splitext(best_model_path)[0] + "_metadata.json"
+    if os.path.exists(metadata_path):
+        print("✔ Metadata verified\n")
+        
+    is_cached, _ = verify_cache("training_complete")
+    if is_cached:
+        print("✔ Cache verified\n")
+        
+    if onnx_success:
+        print("✔ ONNX model exported successfully\n")
+    else:
+        print("⚠ ONNX export skipped (optional)\n")
+    print("========================================")
 
 if __name__ == "__main__":
     main()

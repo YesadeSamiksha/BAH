@@ -192,7 +192,8 @@ STAGE_OUTPUTS = {
     ],
     "training_complete": [
         os.path.join(MODEL_DIR, "best_model.pth"),
-        os.path.join(MODEL_DIR, "best_model.onnx"),
+        os.path.join(MODEL_DIR, "best_model_metadata.json"),
+        os.path.join(get_experiment_dir(), "experiment.json"),
         os.path.join(OUTPUT_DIR, "training_curve.png"),
         os.path.join(LOG_DIR, "train_loss.csv")
     ],

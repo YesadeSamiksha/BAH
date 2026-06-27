@@ -26,7 +26,8 @@ from config import (
     STAGE_DEPENDENCIES,
     verify_cache,
     update_pipeline_manifest,
-    FAISS_DIR
+    FAISS_DIR,
+    MODEL_DIR
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -75,6 +76,9 @@ def print_status():
     print(f"FAISS Indexing Type   : {FAISS_INDEX}")
     print(f"Dataset Path          : {DATASET_PATH}")
     print(f"Experiment Directory  : {get_experiment_dir()}")
+    onnx_file = os.path.join(MODEL_DIR, "best_model.onnx")
+    onnx_status = "Available" if os.path.exists(onnx_file) else "Not Generated"
+    print(f"ONNX Export           : {onnx_status}")
     print("-" * 85)
     print(f"{'Stage Name':<25} | {'Status':<15} | {'Details / Diagnostic Reasons'}")
     print("-" * 85)
