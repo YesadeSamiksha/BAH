@@ -59,9 +59,10 @@ LEARNING_RATE = 1e-3
 TEMPERATURE = 0.07
 PATIENCE = 5
 AUTO_RESUME = True
-USE_FULL_DATASET = False
+USE_FULL_DATASET = True 
 
 FORCE_LOCAL_FULL_TRAIN = False
+READ_ONLY_MODE = False
 
 def get_backbone_feature_dim(backbone_name):
     """
@@ -177,7 +178,7 @@ def get_dataset_hash():
     if not DATASET_PATH or not os.path.exists(DATASET_PATH):
         return ""
     stat = os.stat(DATASET_PATH)
-    return f"{stat.st_mtime}_{stat.st_size}"
+    return f"{int(stat.st_mtime)}_{stat.st_size}"
 
 # Define Stage Output Artifacts
 STAGE_OUTPUTS = {
@@ -415,7 +416,8 @@ def invalidate_stage_and_dependents(stage_name, reason=None):
         if reason:
             print(f"⚠ Cache Inconsistent. Invalidation triggered: {reason}")
             print(f"  Invalidated stages: {', '.join(invalidated)}")
-        save_pipeline_manifest(manifest)
+        if not READ_ONLY_MODE:
+            save_pipeline_manifest(manifest)
 
 def update_pipeline_manifest(stage_name, status=True):
     """
@@ -511,7 +513,7 @@ def save_model_metadata(model_path):
     except Exception as e:
         print(f"Warning: Failed to save model metadata: {e}")
 
-def verify_model_metadata(model_path, expected_backbone=None, expected_feature_dimension=None, expected_dataset_hash=None, strict_hyperparams=False):
+def verify_model_metadata(model_path, expected_backbone=None, expected_feature_dimension=None, expected_projection_dimension=None, expected_dataset_hash=None, strict_hyperparams=False):
     """
     Loads the model companion metadata and verifies compatibility with current configuration.
     If expected_* parameters are None, falls back to the current configuration constants.
@@ -546,6 +548,9 @@ def verify_model_metadata(model_path, expected_backbone=None, expected_feature_d
         except Exception:
             pass
             
+    if expected_projection_dimension is None:
+        expected_projection_dimension = 128
+            
     if expected_dataset_hash is None:
         expected_dataset_hash = get_dataset_hash()
 
@@ -553,11 +558,11 @@ def verify_model_metadata(model_path, expected_backbone=None, expected_feature_d
     critical_checks = {
         "backbone": expected_backbone,
         "feature_dimension": expected_feature_dimension,
+        "projection_dimension": expected_projection_dimension,
         "dataset_hash": expected_dataset_hash
     }
     
     strict_checks = {
-        "projection_dimension": 128,
         "faiss_index": FAISS_INDEX,
         "freeze_backbone": FREEZE_BACKBONE,
         "preprocessing_version": "v1",

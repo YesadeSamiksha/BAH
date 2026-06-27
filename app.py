@@ -18,6 +18,41 @@ from train_contrastive import ContrastiveModel, get_backbone_model
 from config import DATASET_PATH, STORAGE_ROOT, FREEZE_BACKBONE
 import config
 
+def safe_display_image(image_input, caption=None):
+    """
+    Displays an image safely in Streamlit by converting it to a NumPy array,
+    preventing stale MediaFileHandler/MediaFileManager warnings.
+    """
+    import numpy as np
+    from PIL import Image
+    
+    try:
+        if image_input is None:
+            raise ValueError("Image input is None")
+            
+        if isinstance(image_input, (str, os.PathLike)):
+            if not os.path.exists(image_input):
+                raise FileNotFoundError(f"File {os.path.basename(image_input)} does not exist")
+            with Image.open(image_input) as img:
+                arr = np.array(img)
+        elif isinstance(image_input, Image.Image):
+            arr = np.array(image_input)
+        elif isinstance(image_input, np.ndarray):
+            arr = image_input.copy()
+        else:
+            arr = np.array(image_input)
+            
+        st.image(arr, width="stretch", caption=caption)
+    except Exception as e:
+        # Gracefully handle missing/failed images by displaying an informative placeholder
+        try:
+            placeholder_arr = np.zeros((224, 224, 3), dtype=np.uint8)
+            placeholder_arr[:, :] = [30, 41, 59]
+            st.image(placeholder_arr, width="stretch", caption="Image Load Failed")
+            st.caption(f"⚠️ Details: {str(e)}")
+        except Exception:
+            st.warning("⚠️ Image unavailable")
+
 # Page Configuration
 st.set_page_config(
     page_title="Cross-Modal Satellite Image Retrieval System",
@@ -74,22 +109,13 @@ st.markdown("""
         padding: 15px;
         margin-bottom: 10px;
         background-color: #0F172A;
-        border: 2px solid;
-        transition: transform 0.2s ease;
+        border: 2px solid #334155;
+        transition: transform 0.2s ease, border-color 0.2s ease;
     }
     
     .result-card:hover {
         transform: scale(1.02);
-    }
-    
-    .result-correct {
-        border-color: #10B981; /* Green */
-        background-color: rgba(16, 185, 129, 0.05);
-    }
-    
-    .result-incorrect {
-        border-color: #EF4444; /* Red */
-        background-color: rgba(239, 68, 68, 0.05);
+        border-color: #4285F4;
     }
 
     /* Subtext */
@@ -123,7 +149,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Define Classes and AI Explanations
+# Define Classes
 CLASSES = {
     1.0: "Aquafarm",
     2.0: "Cloud",
@@ -134,19 +160,6 @@ CLASSES = {
     7.0: "River",
     8.0: "Water"
 }
-
-REASONS = {
-    "Aquafarm": "Matched due to regular grid patterns of coastal enclosures, shallow water reflectivity, and maritime infrastructure footprints.",
-    "Cloud": "Matched based on bright, high-reflectance cloud mass boundaries, localized atmospheric opacity, and diffuse white texture.",
-    "Forest": "Matched due to dense, irregular vegetation canopy texture, low reflectance in visible bands, and high biological cell-density signature.",
-    "High Building": "Matched based on tall concrete footprints, high density shadow projections, and high spatial structural complexity.",
-    "Low Building": "Matched based on residential spatial sprawl, small distinct building boundary profiles, and suburban street grid features.",
-    "Farmland": "Matched due to rectangular field plot divisions, visible crop patterns, and agricultural soil reflectance structures.",
-    "River": "Matched due to winding linear water channels, high absorption in near-infrared spectrum, and riverbank vegetation transitions.",
-    "Water": "Matched based on open water surface characteristics, high visual homogeneity, and deep light absorption properties."
-}
-
-MISMATCH_REASON = "Mismatched class features; retrieved due to similar shape outlines, coarse structural silhouettes, or low-level sensor reflectance overlaps."
 
 def list_available_experiments():
     exp_root = os.path.join(STORAGE_ROOT, "experiments")
@@ -225,12 +238,14 @@ def load_resources(exp_name, retrieval_mode):
         best_model_path = os.path.join(model_dir, "best_model.pth")
         if os.path.exists(best_model_path):
             try:
-                expected_dim = pan_embs.shape[1]
-                from config import verify_model_metadata
+                expected_dim = pan_embs.shape[1]  # 128 (projection dimension)
+                from config import verify_model_metadata, get_backbone_feature_dim
+                expected_feat_dim = get_backbone_feature_dim(backbone_name)
                 verify_model_metadata(
                     best_model_path,
                     expected_backbone=backbone_name,
-                    expected_feature_dimension=expected_dim,
+                    expected_feature_dimension=expected_feat_dim,
+                    expected_projection_dimension=expected_dim,
                     expected_dataset_hash=config.get_dataset_hash(),
                     strict_hyperparams=False
                 )
@@ -490,7 +505,7 @@ with tab_retrieval:
         
         with col_query:
             st.markdown("### 🎯 Query Image")
-            st.image(query_image, use_container_width=True)
+            safe_display_image(query_image)
             
             label_text = CLASSES.get(query_label_val, "Unknown (Uploaded File)")
             st.markdown(f"**Modality**: `{retrieval_mode.split('→')[0].strip()}`")
@@ -505,6 +520,22 @@ with tab_retrieval:
             Total Time : {latency_total:6.2f} ms
             </div>
             """, unsafe_allow_html=True)
+
+            st.markdown("##### 📈 Overall Model Metrics")
+            mode_key = retrieval_mode.replace(" → ", "_")
+            active_metrics = metrics_summaries.get(active_mode, {}).get(mode_key, {})
+            if active_metrics:
+                st.markdown(f"""
+                <div class="stats-box" style="border-left-color: #34A853;">
+                Precision@5 : {active_metrics.get('precision_5', 0.0)*100:6.2f}%<br>
+                Recall@5    : {active_metrics.get('recall_5', 0.0)*100:6.2f}%<br>
+                F1-Score@5  : {active_metrics.get('f1_5', 0.0)*100:6.2f}%<br>
+                mAP@5       : {active_metrics.get('map_5', 0.0)*100:6.2f}%<br>
+                mAP@10      : {active_metrics.get('map_10', 0.0)*100:6.2f}%
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.info("Metrics not precomputed.")
             
         with col_results:
             st.markdown("### 🏆 Top-5 Retrieved Matches")
@@ -513,15 +544,15 @@ with tab_retrieval:
             csv_data = []
             
             for r, (ret_idx, similarity) in enumerate(zip(retrieved_idxs, retrieved_sims)):
-                ret_pan_pil, ret_mul_pil, ret_lbl_val = res["dataset"].get_visualization_images(ret_idx)
-                ret_img = ret_mul_pil if target_modality == "MUL" else ret_pan_pil
-                ret_class_name = CLASSES.get(ret_lbl_val, "Unknown")
+                try:
+                    ret_pan_pil, ret_mul_pil, ret_lbl_val = res["dataset"].get_visualization_images(ret_idx)
+                    ret_img = ret_mul_pil if target_modality == "MUL" else ret_pan_pil
+                    ret_class_name = CLASSES.get(ret_lbl_val, "Unknown")
+                except Exception as e:
+                    st.warning(f"⚠️ Failed to load retrieved match at rank {r+1} (index {ret_idx}): {e}")
+                    continue
                 
                 is_match = (query_label_val is not None and ret_lbl_val == query_label_val)
-                card_class = "result-correct" if is_match else "result-incorrect"
-                match_label = "✅ Match" if is_match else "❌ Mismatch"
-                
-                reason_text = REASONS.get(ret_class_name, MISMATCH_REASON) if is_match else MISMATCH_REASON
                 
                 # Check metric display representation
                 is_ip = isinstance(target_index, (faiss.IndexFlatIP, faiss.IndexHNSWFlat)) # Approximate cosine metric types
@@ -534,18 +565,17 @@ with tab_retrieval:
                     score_header = "Similarity_Score"
 
                 with res_cols[r]:
-                    st.image(ret_img, use_container_width=True)
+                    safe_display_image(ret_img)
                     st.markdown(f"""
-                    <div class="result-card {card_class}">
+                    <div class="result-card">
                         <div style="font-weight: bold; font-size: 0.95rem;">Rank {r+1}</div>
                         <div class="result-meta">
                             {score_html}<br>
                             <b>Class:</b> {ret_class_name}<br>
                             <b>Index:</b> {ret_idx}
                         </div>
-                        <div style="font-size: 0.8rem; font-weight: bold; margin-top: 5px;">{match_label}</div>
                         <div class="result-reason">
-                            {reason_text}
+                            Explainable AI support pending
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -565,11 +595,13 @@ with tab_retrieval:
             writer.writerows(csv_data)
             
             st.markdown("---")
+            mode_key = retrieval_mode.replace(" → ", "_")
             st.download_button(
                 label="📥 Download Retrieval Results (CSV)",
                 data=csv_buffer.getvalue(),
                 file_name=f"retrieval_results_idx_{query_idx}.csv",
-                mime="text/csv"
+                mime="text/csv",
+                key=f"download_{query_idx}_{active_mode}_{mode_key}"
             )
 
 # ----------------- TAB 2: PERFORMANCE DASHBOARD -----------------
@@ -710,7 +742,7 @@ with tab_embeddings:
         st.markdown(f"##### ❌ Before Contrastive Training (Baseline {res['feature_dim']}D)")
         before_tsne_path = os.path.join(paths["OUTPUT_DIR"], "embeddings_tsne_before.png")
         if os.path.exists(before_tsne_path):
-            st.image(before_tsne_path, use_container_width=True)
+            safe_display_image(before_tsne_path)
             st.markdown("<p style='font-size:0.85rem; color:#94A3B8; text-align:center;'>Modalities are completely separated. PAN and MUL representations of the same class do not align in the shared space.</p>", unsafe_allow_html=True)
         else:
             st.info("Missing 'embeddings_tsne_before.png' image for this experiment.")
@@ -719,7 +751,7 @@ with tab_embeddings:
         st.markdown("##### ✅ After Supervised Contrastive Training (Aligned 128D)")
         after_tsne_path = os.path.join(paths["OUTPUT_DIR"], "embeddings_tsne_after.png")
         if os.path.exists(after_tsne_path):
-            st.image(after_tsne_path, use_container_width=True)
+            safe_display_image(after_tsne_path)
             st.markdown("<p style='font-size:0.85rem; color:#94A3B8; text-align:center;'>PAN and MUL representations of the same classes merge and overlap, showing successful cross-modal alignment.</p>", unsafe_allow_html=True)
         else:
             st.info("Missing 'embeddings_tsne_after.png' image for this experiment.")
@@ -816,3 +848,42 @@ with tab_about:
     #### 3. FAISS Indexing (Inner Product)
     **FAISS (Facebook AI Similarity Search)** is utilized for fast similarity search. By normalizing the 128D embeddings to unit length and using dynamic index choices (FlatIP/HNSW/IVF PQ), similarity searches perform **Cosine Similarity calculations** on CPU in less than a millisecond, making it perfect for real-time remote sensing operations.
     """)
+
+# ----------------- SESSION CLEANUP & MEMORY MANAGEMENT -----------------
+# Clean up temporary page-load data and force python garbage collection to prevent memory growth
+import gc
+
+try:
+    del csv_buffer
+except NameError:
+    pass
+try:
+    del csv_data
+except NameError:
+    pass
+try:
+    del query_image
+except NameError:
+    pass
+try:
+    del ret_img
+except NameError:
+    pass
+try:
+    del ret_pan_pil
+except NameError:
+    pass
+try:
+    del ret_mul_pil
+except NameError:
+    pass
+try:
+    del pan_pil
+except NameError:
+    pass
+try:
+    del mul_pil
+except NameError:
+    pass
+
+gc.collect()

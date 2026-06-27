@@ -69,6 +69,8 @@ def get_stage_status_and_reason(stage_name):
         return "⚠ Cache Invalid", reason or "Output files missing or configuration mismatch"
 
 def print_status():
+    import config
+    config.READ_ONLY_MODE = True
     print("=" * 85)
     print("                       CROSS-MODAL PIPELINE STATUS REPORT")
     print("=" * 85)
