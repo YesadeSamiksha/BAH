@@ -1,0 +1,11 @@
+streamlit
+torch
+torchvision
+faiss-cpu
+numpy
+pandas
+matplotlib
+h5py
+pillow
+tqdm
+scipy
