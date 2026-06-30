@@ -134,15 +134,15 @@ def safe_display_image(image_input, caption=None):
         
         # Fallback chain for image sizing in different Streamlit versions
         try:
-            # Streamlit 1.58.0+ stretch parameter
-            st.image(arr, width="stretch", caption=caption, clamp=True)
+            # Streamlit 1.30.0 - 1.57.0 standard parameter
+            st.image(arr, use_container_width=True, caption=caption, clamp=True)
         except (TypeError, ValueError):
             try:
-                # Streamlit 1.30.0 - 1.57.0 parameter
-                st.image(arr, use_container_width=True, caption=caption, clamp=True)
-            except TypeError:
                 # Older Streamlit versions
                 st.image(arr, use_column_width=True, caption=caption, clamp=True)
+            except TypeError:
+                # Streamlit 1.58.0+ stretch parameter
+                st.image(arr, width="stretch", caption=caption, clamp=True)
             
     except Exception as e:
         import logging
@@ -151,12 +151,12 @@ def safe_display_image(image_input, caption=None):
             placeholder_arr = np.zeros((224, 224, 3), dtype=np.uint8)
             placeholder_arr[:, :] = [30, 41, 59]
             try:
-                st.image(placeholder_arr, width="stretch", caption="Display Failed")
+                st.image(placeholder_arr, use_container_width=True, caption="Display Failed")
             except (TypeError, ValueError):
                 try:
-                    st.image(placeholder_arr, use_container_width=True, caption="Display Failed")
-                except TypeError:
                     st.image(placeholder_arr, use_column_width=True, caption="Display Failed")
+                except TypeError:
+                    st.image(placeholder_arr, width="stretch", caption="Display Failed")
             st.caption(f"Error details: {str(e)}")
         except Exception:
             st.warning("Image display unavailable")
@@ -566,6 +566,12 @@ with tab_retrieval:
     query_embedding = None
     latency_extract = 0.0
     latency_search = 0.0
+    
+    # Metadata for Query source recognition
+    query_status_badge = "🟢 Dataset Match"
+    query_source_label = "Dataset Image"
+    query_confidence = None
+    matched_dataset_idx = None
 
     if query_source == "Dataset Index Mode":
         st.markdown(f"Select a query index from the {num_samples:,} stratified samples. Images and metadata will load from the DSRSID dataset.")
@@ -598,6 +604,10 @@ with tab_retrieval:
             type=["png", "jpg", "jpeg"]
         )
         
+        # Initialize default upload status
+        query_status_badge = "⚪ Unknown Image"
+        query_source_label = "Outside Dataset"
+        
         if uploaded_file is not None:
             # Read uploaded file as PIL and convert to NumPy array (Requirement 1, 3, 5)
             query_pil = Image.open(uploaded_file)
@@ -628,7 +638,92 @@ with tab_retrieval:
             
             t1 = time.perf_counter()
             latency_extract = (t1 - t0) * 1000.0
-            query_label_val = None
+            
+            # Intelligent Dataset Recognition & Classification
+            query_modality = "PAN" if retrieval_mode.startswith("PAN") else "MUL"
+            query_index_to_search = res["pan_index"] if query_modality == "PAN" else res["mul_index"]
+            query_vector_for_check = query_embedding.reshape(1, -1).astype('float32')
+            val_sims, val_idxs = query_index_to_search.search(query_vector_for_check, 5)
+            
+            # 1. Exact Dataset Image Detection
+            is_exact_match = False
+            if val_idxs[0].size > 0 and val_idxs[0][0] != -1:
+                potential_idx = int(val_idxs[0][0])
+                potential_sim = float(val_sims[0][0])
+                
+                # Check similarity threshold (flexible enough to handle slight inference differences)
+                is_similar = False
+                if active_mode == "contrastive":
+                    if potential_sim >= 0.95:  # High cosine similarity
+                        is_similar = True
+                else:
+                    if potential_sim <= 10.0:  # Low L2 distance
+                        is_similar = True
+                        
+                if is_similar:
+                    try:
+                        dataset_img_arr = load_dataset_image(potential_idx, query_modality)
+                        # Resize both to 64x64 grayscale for fast and robust pixel comparison
+                        q_img_resized = np.array(Image.fromarray(query_img_arr).resize((64, 64)).convert("L"))
+                        d_img_resized = np.array(Image.fromarray(dataset_img_arr).resize((64, 64)).convert("L"))
+                        mae = np.mean(np.abs(q_img_resized.astype(float) - d_img_resized.astype(float)))
+                        
+                        if mae < 20.0:  # Pixel-wise match
+                            query_label_val = float(res["labels"][potential_idx])
+                            matched_dataset_idx = potential_idx
+                            query_status_badge = "🟢 Dataset Match"
+                            query_source_label = "Dataset Image"
+                            is_exact_match = True
+                    except Exception:
+                        # Fallback if image loading/comparison fails but similarity is extremely high
+                        if (active_mode == "contrastive" and potential_sim >= 0.99) or (active_mode == "baseline" and potential_sim <= 1.0):
+                            query_label_val = float(res["labels"][potential_idx])
+                            matched_dataset_idx = potential_idx
+                            query_status_badge = "🟢 Dataset Match"
+                            query_source_label = "Dataset Image"
+                            is_exact_match = True
+            
+            # 2. Similar Image Classification (if not exact match)
+            if not is_exact_match and val_idxs[0].size > 0 and val_idxs[0][0] != -1:
+                from collections import Counter
+                neighbor_labels = [float(res["labels"][int(idx)]) for idx in val_idxs[0] if idx != -1]
+                if neighbor_labels:
+                    label_counts = Counter(neighbor_labels)
+                    majority_label, count_maj = label_counts.most_common(1)[0]
+                    top1_sim = float(val_sims[0][0])
+                    
+                    # Check classification thresholds
+                    is_confident_sim = False
+                    if active_mode == "contrastive":
+                        if top1_sim >= 0.70:
+                            is_confident_sim = True
+                    else:
+                        if top1_sim <= 150.0:
+                            is_confident_sim = True
+                            
+                    # We need at least a majority vote (e.g. >= 3 out of 5) and confident similarity
+                    if is_confident_sim and count_maj >= 3:
+                        query_label_val = majority_label
+                        query_status_badge = "🔵 Predicted from Retrieval"
+                        query_source_label = "Predicted"
+                        
+                        # Calculate weighted confidence score
+                        # Confidence = (agreement fraction) * (average similarity of majority class neighbors) * 100
+                        maj_sims = []
+                        for sim, lbl in zip(val_sims[0], neighbor_labels):
+                            if lbl == majority_label:
+                                if active_mode == "baseline":
+                                    s = max(0.0, 1.0 - (float(sim) / 200.0))
+                                else:
+                                    s = float(sim)
+                                maj_sims.append(s)
+                        
+                        avg_sim_maj = np.mean(maj_sims) if maj_sims else 0.0
+                        query_confidence = (count_maj / 5.0) * avg_sim_maj * 100.0
+                    else:
+                        query_label_val = None
+                        query_status_badge = "⚪ Unknown Image"
+                        query_source_label = "Outside Dataset"
         else:
             st.info("Please upload an image file to perform retrieval.")
             
@@ -639,7 +734,13 @@ with tab_retrieval:
         t0 = time.perf_counter()
         query_vector = query_embedding.reshape(1, -1).astype('float32')
         
-        exclude_self_idx = query_idx if query_source == "Dataset Index Mode" else None
+        if query_source == "Dataset Index Mode":
+            exclude_self_idx = query_idx
+        elif query_source == "File Upload Mode" and matched_dataset_idx is not None:
+            exclude_self_idx = matched_dataset_idx
+        else:
+            exclude_self_idx = None
+            
         search_k = 6 if exclude_self_idx is not None else 5
         
         similarities, indices = target_index.search(query_vector, search_k)
@@ -671,51 +772,55 @@ with tab_retrieval:
             st.markdown("###  Query Image")
             safe_display_image(query_img_arr)
             
-            label_text = CLASSES.get(query_label_val, "Unknown (Uploaded File)")
+            # Display Class Source Badge below Query Image
+            badge_color = "#22C55E" if query_source_label == "Dataset Image" else "#38BDF8" if query_source_label == "Predicted" else "#94A3B8"
+            st.markdown(f"""
+            <div style="
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                background: rgba(30, 41, 59, 0.6);
+                border: 1px solid {badge_color};
+                padding: 6px 12px;
+                border-radius: 20px;
+                font-family: 'Inter', sans-serif;
+                font-size: 0.85rem;
+                font-weight: 600;
+                color: #FFFFFF;
+                margin-top: 10px;
+                margin-bottom: 10px;
+            ">
+                {query_status_badge}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            label_text = CLASSES.get(query_label_val, "Unknown")
+            
+            # Construct Status and Confidence rows as single-line HTML to avoid Markdown parsing issues (indented code blocks)
+            status_row = f'<tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);"><td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Status</td><td style="padding: 8px 0; text-align: right; color: #FFFFFF; font-weight: 600;">{query_source_label}</td></tr>'
+            
+            confidence_row = ""
+            if query_confidence is not None:
+                confidence_row = f'<tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);"><td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Confidence</td><td style="padding: 8px 0; text-align: right; color: #10B981; font-weight: 600;">{query_confidence:.0f}%</td></tr>'
             
             # Query Information Panel (Requirement 5)
             query_modality = "PAN" if retrieval_mode.startswith("PAN") else "MUL"
             backbone_display = res["backbone_name"].upper()
             st.markdown(f"""
-            <div class="metric-card" style="
-                background: linear-gradient(135deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.9) 100%);
-                border: 1px solid rgba(56, 189, 248, 0.2);
-                border-left: 5px solid #38BDF8;
-                padding: 18px;
-                margin-top: 15px;
-                border-radius: 12px;
-                box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-                backdrop-filter: blur(4px);
-            ">
-                <h4 style="margin: 0 0 12px 0; color: #FFFFFF; font-size: 1.15rem; font-weight: 600; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: 8px; font-family: 'Outfit', sans-serif;"> Query Specifications</h4>
-                <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; font-family: 'Inter', sans-serif; color: #CBD5E1;">
-                    <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
-                        <td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Dataset</td>
-                        <td style="padding: 8px 0; text-align: right; color: #FFFFFF; font-weight: 600;">DSRSID</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
-                        <td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Query Modality</td>
-                        <td style="padding: 8px 0; text-align: right; color: #FFFFFF; font-weight: 600;">{query_modality}</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
-                        <td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Query Class</td>
-                        <td style="padding: 8px 0; text-align: right; color: #38BDF8; font-weight: 600;">{label_text}</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
-                        <td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Encoder Backbone</td>
-                        <td style="padding: 8px 0; text-align: right; color: #FFFFFF; font-weight: 600;">{backbone_display}</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
-                        <td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Embedding Dim</td>
-                        <td style="padding: 8px 0; text-align: right; color: #FFFFFF; font-weight: 600;">{res["feature_dim"]}D</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Retrieval Mode</td>
-                        <td style="padding: 8px 0; text-align: right; color: #F59E0B; font-weight: 600;">{retrieval_mode}</td>
-                    </tr>
-                </table>
-            </div>
-            """, unsafe_allow_html=True)
+<div class="metric-card" style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid rgba(56, 189, 248, 0.2); border-left: 5px solid #38BDF8; padding: 18px; margin-top: 15px; border-radius: 12px; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37); backdrop-filter: blur(4px);">
+<h4 style="margin: 0 0 12px 0; color: #FFFFFF; font-size: 1.15rem; font-weight: 600; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: 8px; font-family: 'Outfit', sans-serif;"> Query Specifications</h4>
+<table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; font-family: 'Inter', sans-serif; color: #CBD5E1;">
+<tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);"><td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Dataset</td><td style="padding: 8px 0; text-align: right; color: #FFFFFF; font-weight: 600;">DSRSID</td></tr>
+<tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);"><td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Query Modality</td><td style="padding: 8px 0; text-align: right; color: #FFFFFF; font-weight: 600;">{query_modality}</td></tr>
+<tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);"><td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Query Class</td><td style="padding: 8px 0; text-align: right; color: #38BDF8; font-weight: 600;">{label_text}</td></tr>
+{status_row}
+{confidence_row}
+<tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);"><td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Encoder Backbone</td><td style="padding: 8px 0; text-align: right; color: #FFFFFF; font-weight: 600;">{backbone_display}</td></tr>
+<tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);"><td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Embedding Dim</td><td style="padding: 8px 0; text-align: right; color: #FFFFFF; font-weight: 600;">{res["feature_dim"]}D</td></tr>
+<tr><td style="padding: 8px 0; color: #94A3B8; font-weight: 500;">Retrieval Mode</td><td style="padding: 8px 0; text-align: right; color: #F59E0B; font-weight: 600;">{retrieval_mode}</td></tr>
+</table>
+</div>
+""", unsafe_allow_html=True)
             
             if DEBUG_UI:
                 stats = st.session_state.get("debug_stats", {})
@@ -789,14 +894,14 @@ with tab_retrieval:
                     status_border = "#F59E0B"
                     same_class_status = "Unknown"
                 elif is_match:
-                    status_text = " Same Class"
+                    status_text = "✓ Same Class"
                     status_color = "#22C55E" # Success Green
                     status_bg = "rgba(34, 197, 94, 0.15)"
                     status_border = "#22C55E"
                     same_class_count += 1
                     same_class_status = "Yes"
                 else:
-                    status_text = " Different Class"
+                    status_text = "✗ Different Class"
                     status_color = "#EF4444" # Danger Red
                     status_bg = "rgba(239, 68, 68, 0.15)"
                     status_border = "#EF4444"
@@ -844,6 +949,8 @@ with tab_retrieval:
                         safe_display_image(ret_img)
                         
                         # Similarity progress bar
+                        # Similarity progress bar and confidence score
+                        st.markdown(f"<p style='margin: 0; font-size: 0.85rem; font-weight: 600; color: #10B981;'>Confidence: {similarity_pct:.2f}%</p>", unsafe_allow_html=True)
                         st.progress(similarity_pct / 100.0)
                         
                         # Factual metadata specifications
@@ -855,6 +962,7 @@ with tab_retrieval:
                         - Modality: `{target_modality}`
                         - Resolution: `224 × 224`
                         - Distance: `{calc_dist:.4f}`
+                        - Confidence: `{similarity_pct:.2f}%`
                         """)
                 
                 csv_data.append({
