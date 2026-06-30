@@ -127,10 +127,13 @@ The Streamlit web interface (`app.py`) offers the following functionalities:
 
 ## Visualizations & Outputs
 
-### 1. Cross-Modal Retrieval Results
+### 1. Interactive Web Dashboard (Streamlit)
+![Interactive Web Dashboard](dashboard_screenshot.png)
+
+### 2. Cross-Modal Retrieval Results
 ![Cross-Modal Retrieval Results](retrieval_results.png)
 
-### 2. Embedding Space Alignment (t-SNE before vs. after Contrastive Learning)
+### 3. Embedding Space Alignment (t-SNE before vs. after Contrastive Learning)
 | Before Contrastive Training (Baseline) | After Contrastive Training (Aligned) |
 |:---:|:---:|
 | ![t-SNE Before](embeddings_tsne_before.png) | ![t-SNE After](embeddings_tsne_after.png) |
