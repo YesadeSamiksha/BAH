@@ -52,6 +52,10 @@ metrics_summary.json
 # Generated Images
 # ==========================
 *.png
+!dashboard_screenshot.png
+!retrieval_results.png
+!embeddings_tsne_before.png
+!embeddings_tsne_after.png
 
 # ==========================
 # Jupyter
